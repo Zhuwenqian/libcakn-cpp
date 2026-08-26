@@ -1,30 +1,39 @@
 #include "relationship.h"
 #include "version.h"
 
+#include <QJsonArray>
+#include <QJsonObject>
+
 namespace ckan {
 
 QJsonObject Relationship::toJsonObject() const
 {
     QJsonObject obj;
+    // any_of：写为 {"any_of": [...]}，子关系各自序列化（官方 CKAN 格式）
+    if (!anyOf.isEmpty()) {
+        QJsonArray arr;
+        for (const Relationship &s : anyOf) arr.append(s.toJsonObject());
+        obj.insert(QStringLiteral("any_of"), arr);
+        return obj;
+    }
     obj.insert(QStringLiteral("name"), name);
-    // 重建版本约束字符串（尽量还原原始 version；否则由 min/max 推导）
-    QString v = version;
-    if (v.isEmpty()) {
-        if (!minVersion.isEmpty() && minVersion == maxVersion && minInclusive && maxInclusive) {
-            v = minVersion;
-        } else if (!minVersion.isEmpty() || !maxVersion.isEmpty()) {
-            const QString minPfx = minInclusive ? QStringLiteral(">=") : QStringLiteral(">");
-            const QString maxPfx = maxInclusive ? QStringLiteral("<=") : QStringLiteral("<");
-            if (!minVersion.isEmpty() && maxVersion.isEmpty())
-                v = minPfx + minVersion;
-            else if (minVersion.isEmpty() && !maxVersion.isEmpty())
-                v = maxPfx + maxVersion;
-            else
-                v = minPfx + minVersion + QLatin1Char(' ') + maxPfx + maxVersion;
+    if (!version.isEmpty()) {
+        // 原始 version 键保留（含 ">=1.2" 这类前缀写法）
+        obj.insert(QStringLiteral("version"), version);
+    } else if (!minVersion.isEmpty() || !maxVersion.isEmpty()) {
+        // 独立键形式（官方 ModuleRelationshipDescriptor）：
+        // min_version / max_version 单独写出，inclusive 非默认值（true）时才写出。
+        if (!minVersion.isEmpty()) {
+            obj.insert(QStringLiteral("min_version"), minVersion);
+            if (!minInclusive)
+                obj.insert(QStringLiteral("min_version_inclusive"), false);
+        }
+        if (!maxVersion.isEmpty()) {
+            obj.insert(QStringLiteral("max_version"), maxVersion);
+            if (!maxInclusive)
+                obj.insert(QStringLiteral("max_version_inclusive"), false);
         }
     }
-    if (!v.isEmpty())
-        obj.insert(QStringLiteral("version"), v);
     return obj;
 }
 

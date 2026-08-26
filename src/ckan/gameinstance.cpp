@@ -304,8 +304,22 @@ Registry *GameInstance::registry()
     return &m_registry;
 }
 
+bool GameInstance::acquireRegistryLock() const
+{
+    if (m_registryLocked) return true;
+    if (m_registryLock.acquire(ckanDir() + QStringLiteral("/registry.locked"))) {
+        m_registryLocked = true;
+        return true;
+    }
+    return false; // 另一进程持有注册表锁
+}
+
 void GameInstance::loadRegistry()
 {
+    // 获取跨进程锁（最佳努力）：拿不到锁（另一进程占用）时仍只读加载，
+    // 但后续 saveRegistry 会因无锁而拒绝写入，避免并发写坏 registry.json。
+    acquireRegistryLock();
+
     QFile f(registryPath());
     if (f.exists() && f.open(QIODevice::ReadOnly)) {
         QString err;
@@ -315,14 +329,20 @@ void GameInstance::loadRegistry()
     m_registryLoaded = true;
 }
 
-void GameInstance::saveRegistry() const
+bool GameInstance::saveRegistry() const
 {
+    // 未持有锁则先尝试获取；仍失败说明另一进程正在操作该注册表，跳过写入以防损坏。
+    if (!m_registryLocked && !acquireRegistryLock())
+        return false;
+
     QDir().mkpath(ckanDir());
     QFile f(registryPath());
     if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         f.write(m_registry.toJson());
         f.close();
+        return true;
     }
+    return false;
 }
 
 void GameInstance::restoreRegistrySnapshot(const QByteArray &json)
@@ -333,7 +353,7 @@ void GameInstance::restoreRegistrySnapshot(const QByteArray &json)
     else
         m_registry = Registry::fromJson(json, &err);
     m_registryLoaded = true;
-    saveRegistry(); // 同步写回磁盘，保证内存与 registry.json 一致
+    saveRegistry(); // 同步写回磁盘，保证内存与 registry.json 一致（回滚场景拿不到锁时尽力而为）
 }
 
 bool GameInstance::isValid() const

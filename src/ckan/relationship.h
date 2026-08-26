@@ -2,6 +2,7 @@
 #define CKAN_RELATIONSHIP_H
 
 #include <QString>
+#include <QVector>
 #include <QJsonObject>
 #include "ckan_export.h"
 
@@ -29,6 +30,7 @@ public:
     QString maxVersion;   // 解析出的最大版本（可选）
     bool    minInclusive = false;
     bool    maxInclusive = false;
+    QVector<Relationship> anyOf; // any_of 关系：任一子依赖满足即可（子关系继承 type）
 
     bool isVirtual() const;  // 由 ProvidesList 在解析时判断
 

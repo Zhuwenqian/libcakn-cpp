@@ -12,6 +12,7 @@
 #include <QThreadPool>
 #include <QFuture>
 #include <memory>
+#include <cmath>
 
 #include "gameinstance.h"
 #include "registry.h"
@@ -156,6 +157,63 @@ QString ModuleInstaller::safeCacheFileName(const QString &s)
     return r;
 }
 
+QString ModuleInstaller::officialCacheFileName(const QString &identifier, const QString &version,
+                                               const QString &downloadUrl)
+{
+    // 官方 CkanModule.StandardName：{identifier}-{version}.zip，
+    // version 中不在 [A-Za-z0-9_.-] 集合内的字符全部替换为 '-'
+    QString v = version;
+    for (int i = 0; i < v.size(); ++i) {
+        const QChar c = v.at(i);
+        const bool keep = (c >= QLatin1Char('A') && c <= QLatin1Char('Z'))
+                       || (c >= QLatin1Char('a') && c <= QLatin1Char('z'))
+                       || (c >= QLatin1Char('0') && c <= QLatin1Char('9'))
+                       || c == QLatin1Char('.') || c == QLatin1Char('_') || c == QLatin1Char('-');
+        if (!keep)
+            v[i] = QLatin1Char('-');
+    }
+    // 官方 NetFileCache.CacheKey：下载 URL 的 SHA1 前 8 位十六进制大写。
+    // 形如 6F5B077A-FreeIva-0.2.20.2.zip；URL 为空时退化为无前缀形式。
+    QString prefix;
+    if (!downloadUrl.isEmpty()) {
+        const QByteArray sha1 = QCryptographicHash::hash(
+            downloadUrl.toUtf8(), QCryptographicHash::Sha1);
+        prefix = QString::fromLatin1(sha1.toHex()).left(8).toUpper() + QLatin1Char('-');
+    }
+    return prefix + identifier + QLatin1Char('-') + v + QStringLiteral(".zip");
+}
+
+QString ModuleInstaller::findCacheZip(const QString &downloadDir, const CkanModule &mod)
+{
+    const QString url = mod.downloadUrls.isEmpty() ? QString() : mod.downloadUrls.first();
+    // 官方格式优先（带 SHA1 URL 哈希前缀，对应 D:\CKAN Downloads 等官方缓存目录）
+    const QString official = downloadDir + QLatin1Char('/')
+                           + officialCacheFileName(mod.identifier, mod.version, url);
+    if (QFileInfo::exists(official) && isValidZipFile(official, mod.downloadHash.sha256))
+        return official;
+    // 手动下载的无前缀 {identifier}-{version}.zip 兜底
+    const QString plain = downloadDir + QLatin1Char('/')
+                        + officialCacheFileName(mod.identifier, mod.version);
+    if (QFileInfo::exists(plain) && isValidZipFile(plain, mod.downloadHash.sha256))
+        return plain;
+    // 本启动器格式兜底
+    const QString launcher = downloadDir + QLatin1Char('/') + mod.identifier + QLatin1Char('_')
+                           + safeCacheFileName(mod.version) + QStringLiteral(".zip");
+    if (QFileInfo::exists(launcher) && isValidZipFile(launcher, mod.downloadHash.sha256))
+        return launcher;
+    return QString();
+}
+
+qint64 ModuleInstaller::estimateRequiredBytes(const QVector<CkanModule> &modules, double bufferFactor)
+{
+    qint64 total = 0;
+    for (const CkanModule &m : modules) {
+        if (m.isMetapackage()) continue;
+        total += m.downloadSize > 0 ? m.downloadSize : 1;
+    }
+    return static_cast<qint64>(std::ceil(total * bufferFactor));
+}
+
 QStringList ModuleInstaller::actualGameDataFolders(const QString &zipPath, const CkanModule &mod,
                                                    QString *error)
 {
@@ -218,6 +276,16 @@ bool ModuleInstaller::downloadModules(const QVector<CkanModule> &modules,
     m_cancelRequested.store(false);
     QDir().mkpath(downloadDir);
 
+    // 前置拦截 DLC：官方付费内容不可经 CKAN 下载/安装（对应 ModuleIsDLCKraken），
+    // 在任何下载发生之前直接失败，避免浪费流量。
+    for (const CkanModule &mod : modules) {
+        if (mod.isDlc()) {
+            if (error) *error = QStringLiteral("DLC 不可直接安装：%1（官方付费内容，请通过 Steam 购买安装）")
+                                    .arg(mod.identifier);
+            return false;
+        }
+    }
+
     // 前置校验：非元包必须有下载地址
     for (const CkanModule &mod : modules) {
         if (mod.isMetapackage()) continue;
@@ -240,16 +308,26 @@ bool ModuleInstaller::downloadModules(const QVector<CkanModule> &modules,
             continue;
         }
 
-        // 缓存文件名含 version；version 可能带 epoch（如 "1:3.4.0"），需清洗非法字符
-        const QString zipPath = downloadDir + QLatin1Char('/') + mod.identifier + QLatin1Char('_')
-                              + safeCacheFileName(mod.version) + QStringLiteral(".zip");
-        // 复用已存在且有效的缓存（含 SHA256 校验），只补缺失/损坏的
-        if (QFileInfo::exists(zipPath) && isValidZipFile(zipPath, mod.downloadHash.sha256)) {
+        // 复用已存在且有效的缓存（官方格式或本启动器格式，含 SHA256 校验），只补缺失/损坏的
+        // （兼容 D:\CKAN Downloads 等官方缓存目录的 {identifier}-{version}.zip 命名）
+        if (!findCacheZip(downloadDir, mod).isEmpty()) {
             preDone += size;
             continue;
         }
+        const QString zipPath = downloadDir + QLatin1Char('/') + mod.identifier + QLatin1Char('_')
+                              + safeCacheFileName(mod.version) + QStringLiteral(".zip");
         if (QFile::exists(zipPath))
-            QFile::remove(zipPath); // 清理损坏/无效的缓存后再重新下载
+            QFile::remove(zipPath); // 清理损坏/无效的本启动器格式缓存后再重新下载
+        // 同时清理损坏/无效的官方格式缓存（带哈希前缀与无前缀两种），避免残留旧文件
+        const QString staleUrl = mod.downloadUrls.isEmpty() ? QString() : mod.downloadUrls.first();
+        const QString staleOfficial = downloadDir + QLatin1Char('/')
+                                    + officialCacheFileName(mod.identifier, mod.version, staleUrl);
+        if (QFile::exists(staleOfficial))
+            QFile::remove(staleOfficial);
+        const QString stalePlain = downloadDir + QLatin1Char('/')
+                                 + officialCacheFileName(mod.identifier, mod.version);
+        if (QFile::exists(stalePlain))
+            QFile::remove(stalePlain);
 
         // 该模组下载镜像：每个前缀拼接官方 URL，作为回退（或镜像优先）
         QStringList modMirrors;
@@ -398,6 +476,9 @@ InstallResult ModuleInstaller::installFromCache(const QVector<CkanModule> &modul
         emit installProgress(mod.identifier, 0);
         if (m_cancelRequested.load())
             return fail(QStringLiteral("已取消"));
+        if (mod.isDlc())
+            return fail(QStringLiteral("DLC 不可直接安装：%1（官方付费内容，请通过 Steam 购买安装）")
+                .arg(mod.identifier));
         if (mod.isMetapackage()) {
             // 元包无文件，仅注册
             InstalledModule im;
@@ -412,9 +493,9 @@ InstallResult ModuleInstaller::installFromCache(const QVector<CkanModule> &modul
         if (mod.downloadUrls.isEmpty())
             return fail(QStringLiteral("%1 has no download URL").arg(mod.identifier));
 
-        const QString zipPath = downloadDir + QLatin1Char('/') + mod.identifier + QLatin1Char('_')
-                              + safeCacheFileName(mod.version) + QStringLiteral(".zip");
-        if (!QFileInfo::exists(zipPath) || !isValidZipFile(zipPath, mod.downloadHash.sha256))
+        // 定位缓存文件：优先官方格式，其次本启动器格式（兼容 D:\CKAN Downloads 等官方缓存目录）
+        const QString zipPath = findCacheZip(downloadDir, mod);
+        if (zipPath.isEmpty())
             return fail(QStringLiteral("download cache missing or invalid: %1，请先下载")
                 .arg(mod.identifier));
 
@@ -482,6 +563,15 @@ InstallResult ModuleInstaller::installFromCache(const QVector<CkanModule> &modul
         // 提取并复制文件到 GameData（事务化写入，失败整体回滚）
         QStringList installedRelPaths;
         for (const InstallableFile &f : files) {
+            // 文件级覆盖冲突检测（对应官方 Registry.RegisterModule 的 installed_files 一致性检查）：
+            // 目标文件已被其他已安装模组登记归属 → 拒绝覆盖并整体回滚。
+            // 归属为本模块自身（升级/重装同标识符）则允许覆盖。
+            const QString owner = reg->fileOwner(f.destination);
+            if (!owner.isEmpty() && owner != mod.identifier) {
+                mz_zip_reader_end(&zip);
+                return fail(QStringLiteral("文件冲突：%1 %2 将覆盖已安装模组 %3 的文件 %4")
+                    .arg(mod.identifier, mod.version, owner, f.destination));
+            }
             QByteArray content;
             if (!extractToMem(zip, f.sourceName.toUtf8().constData(), &content, &result.error)) {
                 mz_zip_reader_end(&zip);
@@ -510,7 +600,8 @@ InstallResult ModuleInstaller::installFromCache(const QVector<CkanModule> &modul
     }
 
     if (autoTx) {
-        m_instance->saveRegistry();
+        if (!m_instance->saveRegistry())
+            return fail(QStringLiteral("注册表被其他进程占用，无法保存（registry.locked 已被持有）"));
         tx->commit();
     }
     result.ok = true;
@@ -584,7 +675,8 @@ InstallResult ModuleInstaller::uninstall(const QString &identifier, TxFileManage
     }
 
     if (autoTx) {
-        m_instance->saveRegistry();
+        if (!m_instance->saveRegistry())
+            return fail(QStringLiteral("注册表被其他进程占用，无法保存（registry.locked 已被持有）"));
         tx->commit();
     }
     result.ok = true;

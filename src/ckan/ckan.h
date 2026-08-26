@@ -66,18 +66,31 @@ public:
     bool isInstalled(const QString &identifier) const;
     QVector<InstalledModule> installedModules() const;
 
+    // ---- 整合包导出 ----
+    // 生成官方 CKAN 元包（metapackage）JSON：depends 列出已安装模组（无版本号），
+    // 排除 DLC / 自动安装 / 手动安装（AD）模组；索引已加载时同样排除索引中不存在的模组。
+    // 排序为依赖在前（拓扑序）。无可导出模组时返回空并填充 error。
+    // 检测不到 KSP 版本时省略 ksp_version_min/max（不视为失败）。
+    QByteArray exportModpackCkan(QString *error = nullptr);
+
     // ---- 手动安装模组（DLL 扫描，AD） ----
-    void scanUnmanagedDlls();   // 扫描 GameData 下 .dll 写入 registry.installedDlls 并保存
+    // 扫描 GameData 下 .dll 写入 registry.installedDlls 并保存；
+    // 结果缓存，重复调用直接返回不再全盘扫描。
+    void scanUnmanagedDlls();
+    // 当前实例的 DLL 扫描是否已完成（用于页面提示"正在扫描/已就绪"）
+    bool dllsScanned() const { return m_dllsScanned; }
     bool isAutoDetected(const QString &identifier) const;
 
     // ---- 依赖解析 ----
     // 解析安装某模块所需的完整集合（含依赖）
     ResolutionResult resolveInstall(const CkanModule &mod, bool autoInstallRecommends = true,
                                     bool withSuggests = false);
-    // 一次性解析多个模块的完整安装集（含相互依赖，用于批量安装）
+    // 一次性解析多个模块的完整安装集（含相互依赖，用于批量安装）。
+    // extraRange: 用户勾选的额外兼容区间（无效表示未启用）；候选兼容当前实例版本或兼容该区间即算兼容。
     ResolutionResult resolveInstallMany(const QVector<CkanModule> &mods,
                                         bool autoInstallRecommends = true,
-                                        bool withSuggests = false);
+                                        bool withSuggests = false,
+                                        const GameVersionRange &extraRange = GameVersionRange());
 
     // ---- 安装流程（分两阶段，供启动器后台线程调用） ----
     // 阶段一：下载全部模块 zip 到 downloadDir，并按 zip 实际内容计算与手动占用文件夹的冲突。
@@ -115,6 +128,14 @@ public:
     // ---- 下载缓存辅助 ----
     // 清洗缓存文件名中的非法字符（Windows 不含冒号/斜杠等），供启动器精确清理缓存。
     static QString safeCacheFileName(const QString &s);
+    // 官方 CKAN 缓存文件名（{SHA1(下载URL)[:8]}-{identifier}-{version}.zip，
+    // URL 为空时退化为无前缀 {identifier}-{version}.zip）。
+    static QString officialCacheFileName(const QString &identifier, const QString &version,
+                                         const QString &downloadUrl = QString());
+    // 查找缓存目录中该模块实际存在的有效缓存文件：官方格式优先，其次本启动器格式；无则返回空。
+    static QString findCacheZip(const QString &downloadDir, const CkanModule &mod);
+    // 估算安装/下载所需磁盘空间（字节）：非元包模块 downloadSize 之和 × bufferFactor（默认 1.15）。
+    static qint64 estimateRequiredBytes(const QVector<CkanModule> &modules, double bufferFactor = 1.15);
 
     // ---- 静态工具 ----
     // 从游戏目录检测 KSP 版本（供启动器发现实例时显示版本号，无需构造实例）。
@@ -135,6 +156,7 @@ private:
     QMap<QString, QVector<CkanModule>> m_index;
     QMap<QString, int> m_downloadCounts; // identifier -> 下载次数（高优先级仓库优先）
     bool m_indexReady = false;
+    bool m_dllsScanned = false;   // 当前实例的 DLL 扫描结果缓存标记
 };
 
 } // namespace ckan

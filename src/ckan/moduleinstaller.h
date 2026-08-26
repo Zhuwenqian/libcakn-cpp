@@ -85,6 +85,23 @@ public:
     // version 可能带 epoch（如 "1:3.4.0"），冒号在 NTFS 上会变成 ADS 分隔符导致读写错位。
     static QString safeCacheFileName(const QString &s);
 
+    // 官方 CKAN 缓存文件名：{SHA1(下载URL)[:8]}-{identifier}-{version}.zip，
+    // version 中非 [A-Za-z0-9_.-] 的字符替换为 '-'。
+    // 哈希前缀对应官方 NetFileCache.CacheKey（如 6F5B077A-FreeIva-0.2.20.2.zip）。
+    // downloadUrl 为空时退化为无前缀形式 {identifier}-{version}.zip（兼容手动下载文件）。
+    static QString officialCacheFileName(const QString &identifier, const QString &version,
+                                         const QString &downloadUrl = QString());
+
+    // 查找缓存目录中该模块实际存在的有效缓存文件：
+    // 优先官方格式 {hash}-{identifier}-{version}.zip，其次手动下载 {identifier}-{version}.zip，
+    // 最后本启动器格式 {identifier}_{safeVersion}.zip。
+    // 均不存在或无效（有效 zip，声明 sha256 时一并校验）返回空字符串。
+    static QString findCacheZip(const QString &downloadDir, const CkanModule &mod);
+
+    // 估算安装/下载所需磁盘空间（字节）：非元包模块 downloadSize 之和 × bufferFactor（默认 1.15）。
+    // 供磁盘空间预检使用；downloadSize 未知的模块按 1 字节计，避免误判为零。
+    static qint64 estimateRequiredBytes(const QVector<CkanModule> &modules, double bufferFactor = 1.15);
+
 signals:
     void installProgress(const QString &identifier, int percent);
     void moduleInstalled(const QString &identifier);

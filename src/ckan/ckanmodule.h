@@ -20,6 +20,14 @@ enum class ModuleKind {
     Dlc,          // 官方 DLC
 };
 
+// 发布状态，对应官方 CKAN 的 ReleaseStatus（stable < testing < development）。
+// 用于稳定度排序/过滤（当前仅解析与序列化，过滤策略由上层决定）。
+enum class ReleaseStatus {
+    Stable      = 0,  // 正式版（JSON: stable / 缺省）
+    Testing     = 1,  // 预发布（JSON: testing / beta）
+    Development = 2,  // 开发版（JSON: development / alpha）
+};
+
 // 下载哈希
 struct CKAN_API DownloadHash {
     QString sha1;
@@ -55,6 +63,10 @@ public:
 
     // 是否兼容某个 KSP 版本
     bool isCompatible(const GameVersion &kspVersion) const;
+    // 是否兼容某个 KSP 版本区间（模组兼容范围与该区间相交即兼容）
+    bool isCompatible(const GameVersionRange &range) const;
+    // 该模组的兼容版本范围（无任何版本信息时为无界区间；min>max 时为“空区间”）
+    GameVersionRange compatibilityRange() const;
 
     // 默认安装规则（无 install 字段时）：find=identifier, install_to=GameData
     QVector<ModuleInstallDescriptor> effectiveInstallStanzas() const;
@@ -76,7 +88,7 @@ public:
     long long installSize  = 0;
 
     ModuleKind kind = ModuleKind::Package;
-    int releaseStatus = 0; // 0=stable
+    ReleaseStatus releaseStatus = ReleaseStatus::Stable; // 对应官方 release_status 字段
 
     QStringList      author;
     QStringList      license;

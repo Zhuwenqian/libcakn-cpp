@@ -8,6 +8,7 @@
 #include "ckan_export.h"
 #include "registry.h"
 #include "version.h"
+#include "filelock.h"
 
 namespace ckan {
 
@@ -24,6 +25,8 @@ public:
 
     // 路径
     QString gameDir() const { return m_gameDir; }
+    // 实例显示名（构造时传入）
+    QString name() const { return m_name; }
     QString ckanDir() const { return m_gameDir + QStringLiteral("/CKAN"); }
     QString downloadDir() const { return m_gameDir + QStringLiteral("/CKAN/downloads"); }
     QString historyDir() const { return m_gameDir + QStringLiteral("/CKAN/history"); }
@@ -50,11 +53,15 @@ public:
     // 覆盖无 DLL 的手动模组（纯配置/纹理），供安装前冲突预扫描使用。
     QStringList manualGameDataFolders() const;
 
-    // 注册表读写（自动加载/保存 registry.json）
+    // 注册表读写（自动加载/保存 registry.json）。
+    // registry.locked 文件锁：独占创建，防多个进程并发写坏 registry.json。
+    // 加载时获取（最佳努力，失败仍只读加载）；保存前确保持有锁，拿不到锁则跳过写入并返回 false。
     Registry *registry();
     const Registry *registry() const { return &m_registry; }
     void loadRegistry();
-    void saveRegistry() const;
+    bool saveRegistry() const;
+    // 当前进程是否持有注册表锁（另一进程占用时为 false）
+    bool registryLockHeld() const { return m_registryLocked; }
 
     // 事务回滚：用事务开始时的注册表 JSON 快照恢复内存状态，并同步写回 registry.json。
     // 空快照表示事务开始时注册表为空（会写入空注册表）。
@@ -74,6 +81,11 @@ private:
     QString m_customDownloadDir;
     Registry m_registry;
     bool m_registryLoaded = false;
+    mutable FileLock m_registryLock;   // registry.locked 跨进程互斥
+    mutable bool     m_registryLocked = false;
+
+    // 获取注册表锁（const 因为需要从 const saveRegistry 调用）。已持有直接成功。
+    bool acquireRegistryLock() const;
 };
 
 } // namespace ckan

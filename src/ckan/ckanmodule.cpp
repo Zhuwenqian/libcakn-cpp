@@ -7,6 +7,60 @@
 namespace ckan {
 
 namespace {
+// 解析单个关系描述符对象（name/version/min_version/max_version 或 any_of）。
+// 官方 CKAN 中 any_of 是一个关系条目，其内部为若干子关系，任一满足即可。
+Relationship parseDescriptor(const QJsonObject &rel, Relationship::Type type)
+{
+    Relationship r;
+    r.type = type;
+
+    // any_of：子关系继承外层 type（depends 内的 any_of 仍是硬性依赖）
+    const QJsonValue anyOfVal = rel.value(QStringLiteral("any_of"));
+    if (anyOfVal.isArray()) {
+        for (const QJsonValue &subItem : anyOfVal.toArray()) {
+            if (subItem.isString()) {
+                Relationship sr;
+                sr.type = type;
+                sr.name = subItem.toString();
+                r.anyOf.append(sr);
+            } else if (subItem.isObject()) {
+                r.anyOf.append(parseDescriptor(subItem.toObject(), type));
+            }
+        }
+        return r; // any_of 对象本身无 name
+    }
+
+    r.name = rel.value(QStringLiteral("name")).toString();
+    const QString ver = rel.value(QStringLiteral("version")).toString();
+    r.version = ver;
+    if (!ver.isEmpty()) {
+        // version 键：同时约束上下界（兼容 ">=1.2" 这类前缀写法）
+        if (ver.startsWith(QStringLiteral(">="))) {
+            r.minVersion = ver.mid(2); r.minInclusive = true;
+        } else if (ver.startsWith(QStringLiteral("<="))) {
+            r.maxVersion = ver.mid(2); r.maxInclusive = true;
+        } else if (ver.startsWith(QLatin1Char('>'))) {
+            r.minVersion = ver.mid(1); r.minInclusive = false;
+        } else if (ver.startsWith(QLatin1Char('<'))) {
+            r.maxVersion = ver.mid(1); r.maxInclusive = false;
+        } else if (ver.startsWith(QLatin1Char('='))) {
+            r.minVersion = ver.mid(1); r.minInclusive = true;
+            r.maxVersion = ver.mid(1); r.maxInclusive = true;
+        } else {
+            r.minVersion = ver; r.minInclusive = true;
+            r.maxVersion = ver; r.maxInclusive = true;
+        }
+    } else {
+        // 独立的 min_version / max_version 键（官方 ModuleRelationshipDescriptor）。
+        // inclusive 缺省为 true（与官方 RelationshipDescriptor 的 DefaultValue 一致）。
+        r.minVersion = rel.value(QStringLiteral("min_version")).toString();
+        r.maxVersion = rel.value(QStringLiteral("max_version")).toString();
+        r.minInclusive = rel.value(QStringLiteral("min_version_inclusive")).toBool(true);
+        r.maxInclusive = rel.value(QStringLiteral("max_version_inclusive")).toBool(true);
+    }
+    return r;
+}
+
 QVector<Relationship> parseRelationships(const QJsonObject &obj, const QString &key, Relationship::Type type)
 {
     QVector<Relationship> out;
@@ -19,31 +73,7 @@ QVector<Relationship> parseRelationships(const QJsonObject &obj, const QString &
             r.name = item.toString();
             out.append(r);
         } else if (item.isObject()) {
-            const QJsonObject rel = item.toObject();
-            Relationship r;
-            r.type = type;
-            r.name = rel.value(QStringLiteral("name")).toString();
-            const QString ver = rel.value(QStringLiteral("version")).toString();
-            r.version = ver;
-            // 解析版本约束，如 ">=1.2", "1.2.3", "<=3.0"
-            if (!ver.isEmpty()) {
-                if (ver.startsWith(QStringLiteral(">="))) {
-                    r.minVersion = ver.mid(2); r.minInclusive = true;
-                } else if (ver.startsWith(QStringLiteral("<="))) {
-                    r.maxVersion = ver.mid(2); r.maxInclusive = true;
-                } else if (ver.startsWith(QLatin1Char('>'))) {
-                    r.minVersion = ver.mid(1); r.minInclusive = false;
-                } else if (ver.startsWith(QLatin1Char('<'))) {
-                    r.maxVersion = ver.mid(1); r.maxInclusive = false;
-                } else if (ver.startsWith(QLatin1Char('='))) {
-                    r.minVersion = ver.mid(1); r.minInclusive = true;
-                    r.maxVersion = ver.mid(1); r.maxInclusive = true;
-                } else {
-                    r.minVersion = ver; r.minInclusive = true;
-                    r.maxVersion = ver; r.maxInclusive = true;
-                }
-            }
-            out.append(r);
+            out.append(parseDescriptor(item.toObject(), type));
         }
     }
     return out;
@@ -78,6 +108,16 @@ CkanModule CkanModule::fromJsonObject(const QJsonObject &obj, QString *error)
     const QString kindStr = obj.value(QStringLiteral("kind")).toString();
     if (kindStr == QStringLiteral("metapackage")) m.kind = ModuleKind::Metapackage;
     else if (kindStr == QStringLiteral("dlc")) m.kind = ModuleKind::Dlc;
+
+    // release_status：对应官方 JsonReleaseStatusConverter（stable/testing/development，
+    // beta→testing、alpha→development、缺省→stable、空字符串→stable 宽容处理）。
+    const QString rs = obj.value(QStringLiteral("release_status")).toString().toLower();
+    if (rs == QStringLiteral("testing") || rs == QStringLiteral("beta"))
+        m.releaseStatus = ReleaseStatus::Testing;
+    else if (rs == QStringLiteral("development") || rs == QStringLiteral("alpha"))
+        m.releaseStatus = ReleaseStatus::Development;
+    else
+        m.releaseStatus = ReleaseStatus::Stable;
 
     const auto readStrList = [&obj](const QString &key) {
         QStringList out;
@@ -148,46 +188,43 @@ CkanModule CkanModule::fromJson(const QByteArray &json, QString *error)
     return fromJsonObject(doc.object(), error);
 }
 
-bool CkanModule::isCompatible(const GameVersion &ksp) const
+GameVersionRange CkanModule::compatibilityRange() const
 {
     // 官方 StrictGameComparator 语义（CKAN-master/Core/Types/GameComparator/StrictGameComparator.cs）：
-    // 1) 无任何 ksp_version 信息 -> 兼容一切
-    // 2) 安装了 ksp_version（非 strict） -> 视为下界 [ksp_version, +inf)
-    // 3) ksp_version + strict -> 等值区间 [ksp_version, ksp_version]
-    // 4) ksp_version_min / ksp_version_max -> 相应单侧区间
-    // 5) 两者都声明 -> [min, max]
-    // 游戏版本检测失败（ksp 无效）时按兼容处理。
-    if (!ksp.isValid())
-        return true;
-
-    if (kspVersion.isEmpty() && kspVersionMin.isEmpty() && kspVersionMax.isEmpty())
-        return true;
-
-    const GameVersion kspVer(kspVersion);
-    const GameVersion minVer(kspVersionMin);
-    const GameVersion maxVer(kspVersionMax);
-
+    // 1) 无任何 ksp_version 信息 -> 无界区间（兼容一切）
+    // 2) 声明了 ksp_version（无论 strict 与否） -> 该版本线即兼容区间
+    //    [ksp_version, ksp_version]（如 1.3.1 -> [1.3.1.0, 1.4.0.0)），
+    //    而不是「1.3.1 及以上」——否则旧模组会被误判为兼容现代 KSP
+    // 3) ksp_version_min / ksp_version_max -> 相应单侧区间（优先于 ksp_version 推导值）
+    // 4) 两者都声明 -> [min, max]
     GameVersion lower;   // 无效值代表无界
     GameVersion upper;
     if (!kspVersion.isEmpty()) {
-        if (kspVersionStrict) {
-            lower = kspVer;
-            upper = kspVer;
-        } else {
-            lower = kspVer; // 非 strict：作为最低兼容版本
-        }
+        const GameVersion kspVer(kspVersion);
+        lower = kspVer;
+        upper = kspVer;
     }
     if (!kspVersionMin.isEmpty())
-        lower = minVer; // 显式 min 优先于 ksp_version 推导出的下界
+        lower = GameVersion(kspVersionMin); // 显式 min 优先于 ksp_version 推导出的下界
     if (!kspVersionMax.isEmpty())
-        upper = maxVer; // 显式 max 优先于 ksp_version 推导出的上界
+        upper = GameVersion(kspVersionMax); // 显式 max 优先于 ksp_version 推导出的上界
 
-    // 区间有效性：min > max 视为不兼容
-    if (lower.isValid() && upper.isValid() && lower > upper)
-        return false;
+    // 区间有效性：min > max 时构造出的区间下界高于上界，
+    // 与任何版本/区间求交均为空（判为不兼容），无需在此特判。
+    return GameVersionRange(lower, true, upper, true);
+}
 
-    const GameVersionRange range(lower, true, upper, true);
-    return range.contains(ksp);
+bool CkanModule::isCompatible(const GameVersion &ksp) const
+{
+    // 游戏版本检测失败（ksp 无效）时按兼容处理。
+    if (!ksp.isValid())
+        return true;
+    return compatibilityRange().contains(ksp);
+}
+
+bool CkanModule::isCompatible(const GameVersionRange &range) const
+{
+    return compatibilityRange().intersects(range);
 }
 
 QVector<ModuleInstallDescriptor> CkanModule::effectiveInstallStanzas() const
@@ -224,6 +261,11 @@ QJsonObject CkanModule::toJsonObject() const
     if (!downloadContentType.isEmpty()) obj.insert(QStringLiteral("download_content_type"), downloadContentType);
     if (kind == ModuleKind::Metapackage) obj.insert(QStringLiteral("kind"), QStringLiteral("metapackage"));
     else if (kind == ModuleKind::Dlc) obj.insert(QStringLiteral("kind"), QStringLiteral("dlc"));
+    // release_status：仅非 stable 时写出（stable 为默认值，与官方 DefaultValue 一致）
+    if (releaseStatus == ReleaseStatus::Testing)
+        obj.insert(QStringLiteral("release_status"), QStringLiteral("testing"));
+    else if (releaseStatus == ReleaseStatus::Development)
+        obj.insert(QStringLiteral("release_status"), QStringLiteral("development"));
 
     const auto writeList = [&obj](const QString &key, const QStringList &list) {
         if (!list.isEmpty()) obj.insert(key, QJsonArray::fromStringList(list));

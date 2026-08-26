@@ -140,45 +140,91 @@ GameVersionRange::GameVersionRange()
 GameVersionRange::GameVersionRange(const GameVersion &lower, bool lowerInclusive,
                                    const GameVersion &upper, bool upperInclusive)
 {
-    // 无效的 GameVersion 表示该侧无界（对应官方 GameVersion.Any）。
-    if (lower.isValid()) {
-        m_lowerSet = true;
-        m_lower = lower;
-    }
-    if (upper.isValid()) {
-        m_upperSet = true;
-        m_upper = upper;
-    }
-    // 兼容判定只使用等值/无界区间，两侧边界恒为包含
+    // 官方 GameVersionRange(lower, upper) 语义：每个边界先经 ToVersionRange 半开展开，
+    // 下界取展开区间的 Lower（包含），上界取展开区间的 Upper（开闭视原版本是否完整而定）。
+    // 显式传入的开闭标记在此被展开语义取代（现有调用均为 true,true）。
     (void)lowerInclusive;
     (void)upperInclusive;
+    if (lower.isValid()) {
+        const GameVersionRange lr = lower.toVersionRange();
+        setLower(lr.lower(), lr.lowerInclusive());
+    }
+    if (upper.isValid()) {
+        const GameVersionRange ur = upper.toVersionRange();
+        setUpper(ur.upper(), ur.upperInclusive());
+    }
 }
+
+void GameVersionRange::setLower(const GameVersion &v, bool inclusive)
+{
+    if (!v.isValid()) return;
+    m_lower = v;
+    m_lowerSet = true;
+    m_lowerInclusive = inclusive;
+}
+
+void GameVersionRange::setUpper(const GameVersion &v, bool inclusive)
+{
+    if (!v.isValid()) return;
+    m_upper = v;
+    m_upperSet = true;
+    m_upperInclusive = inclusive;
+}
+
+namespace {
+// 区间边界（含开闭与是否设置），对应官方 GameVersionBound。
+struct VersionBound {
+    GameVersion value;
+    bool set = false;
+    bool inclusive = false;
+};
+
+// 两个下界取较高者；相等时取包含侧（更宽松）。
+VersionBound highestBound(const VersionBound &a, const VersionBound &b)
+{
+    if (!a.set) return b;
+    if (!b.set) return a;
+    if (a.value > b.value) return a;
+    if (b.value > a.value) return b;
+    return a.inclusive ? a : b;
+}
+
+// 两个上界取较低者；相等时取排除侧（更严格）。
+VersionBound lowestBound(const VersionBound &a, const VersionBound &b)
+{
+    if (!a.set) return b;
+    if (!b.set) return a;
+    if (a.value < b.value) return a;
+    if (b.value < a.value) return b;
+    return a.inclusive ? b : a;
+}
+
+// 官方 IsEmpty：上界 < 下界，或相等但两侧不都包含。
+bool isEmptyRange(const VersionBound &lo, const VersionBound &hi)
+{
+    if (!lo.set || !hi.set) return false;
+    if (hi.value < lo.value) return true;
+    if (hi.value == lo.value && (!lo.inclusive || !hi.inclusive)) return true;
+    return false;
+}
+} // namespace
 
 bool GameVersionRange::contains(const GameVersion &value) const
 {
-    if (m_lowerSet && value < m_lower) return false;
-    if (m_upperSet && value > m_upper) return false;
-    return true;
+    // 官方 Contains：与 value.ToVersionRange() 求交；无效（Any）版本视为兼容
+    if (!value.isValid()) return true;
+    return intersects(value.toVersionRange());
 }
 
 bool GameVersionRange::intersects(const GameVersionRange &other) const
 {
-    // 交集下界 = 两者下界较大者；交集上界 = 两者上界较小者。
-    // 当下界与上界都存在且 下界 > 上界 时无交集。
-    const bool hasLower = lowerSet() || other.lowerSet();
-    GameVersion lo;
-    if (hasLower) {
-        if (lowerSet() && other.lowerSet()) lo = lower() > other.lower() ? lower() : other.lower();
-        else lo = lowerSet() ? lower() : other.lower();
-    }
-    const bool hasUpper = upperSet() || other.upperSet();
-    GameVersion hi;
-    if (hasUpper) {
-        if (upperSet() && other.upperSet()) hi = upper() < other.upper() ? upper() : other.upper();
-        else hi = upperSet() ? upper() : other.upper();
-    }
-    if (hasLower && hasUpper && lo > hi) return false;
-    return true;
+    const VersionBound loA{ m_lower, m_lowerSet, m_lowerInclusive };
+    const VersionBound loB{ other.m_lower, other.m_lowerSet, other.m_lowerInclusive };
+    const VersionBound hiA{ m_upper, m_upperSet, m_upperInclusive };
+    const VersionBound hiB{ other.m_upper, other.m_upperSet, other.m_upperInclusive };
+    const VersionBound lo = highestBound(loA, loB);
+    const VersionBound hi = lowestBound(hiA, hiB);
+    return !isEmptyRange(lo, hi);
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +233,7 @@ bool GameVersionRange::intersects(const GameVersionRange &other) const
 
 GameVersion::GameVersion(const QString &versionString)
 {
-    // 形如 "1.12.3" 或 "1.12.3.1234"
+    // 形如 "1.12.3" 或 "1.12.3.1234"；记录每个分量是否显式声明
     const QStringList parts = versionString.split(QLatin1Char('.'));
     if (parts.isEmpty() || parts.size() > 4) return;
 
@@ -202,11 +248,17 @@ GameVersion::GameVersion(const QString &versionString)
     m_minor = nums.value(1, 0);
     m_patch = nums.value(2, 0);
     m_build = nums.value(3, 0);
+    m_majorDefined = parts.size() >= 1;
+    m_minorDefined = parts.size() >= 2;
+    m_patchDefined = parts.size() >= 3;
+    m_buildDefined = parts.size() >= 4;
     m_valid = true;
 }
 
 GameVersion::GameVersion(int major, int minor, int patch, int build)
     : m_valid(!(major < 0 || minor < 0 || patch < 0 || build < 0)),
+      m_majorDefined(m_valid), m_minorDefined(m_valid),
+      m_patchDefined(m_valid), m_buildDefined(m_valid),
       m_major(major), m_minor(minor), m_patch(patch), m_build(build)
 {
 }
@@ -214,11 +266,39 @@ GameVersion::GameVersion(int major, int minor, int patch, int build)
 QString GameVersion::toString() const
 {
     if (!m_valid) return QString();
-    if (m_build > 0)
+    if (m_buildDefined)
         return QStringLiteral("%1.%2.%3.%4").arg(m_major).arg(m_minor).arg(m_patch).arg(m_build);
-    if (m_patch > 0)
+    if (m_patchDefined)
         return QStringLiteral("%1.%2.%3").arg(m_major).arg(m_minor).arg(m_patch);
-    return QStringLiteral("%1.%2").arg(m_major).arg(m_minor);
+    if (m_minorDefined)
+        return QStringLiteral("%1.%2").arg(m_major).arg(m_minor);
+    return QStringLiteral("%1").arg(m_major);
+}
+
+GameVersionRange GameVersion::toVersionRange() const
+{
+    // 官方 GameVersion.ToVersionRange 语义：
+    //   完整版本（含 build）        -> 点区间 [v, v]
+    //   仅到 patch（无 build）      -> [major.minor.patch.0, major.minor.(patch+1).0)
+    //   仅到 minor（无 patch）      -> [major.minor.0.0, major.(minor+1).0.0)
+    //   仅到 major（无 minor）      -> [major.0.0.0, (major+1).0.0.0)
+    //   无效（Any）                -> 无界区间
+    GameVersionRange r;
+    if (!m_valid) return r;
+    if (m_buildDefined) {
+        r.setLower(*this, true);
+        r.setUpper(*this, true);
+    } else if (m_patchDefined) {
+        r.setLower(GameVersion(m_major, m_minor, m_patch, 0), true);
+        r.setUpper(GameVersion(m_major, m_minor, m_patch + 1, 0), false);
+    } else if (m_minorDefined) {
+        r.setLower(GameVersion(m_major, m_minor, 0, 0), true);
+        r.setUpper(GameVersion(m_major, m_minor + 1, 0, 0), false);
+    } else if (m_majorDefined) {
+        r.setLower(GameVersion(m_major, 0, 0, 0), true);
+        r.setUpper(GameVersion(m_major + 1, 0, 0, 0), false);
+    }
+    return r;
 }
 
 int GameVersion::compareWithoutBuild(const GameVersion &other) const
@@ -233,6 +313,25 @@ int GameVersion::compareTo(const GameVersion &other) const
     const int c = compareWithoutBuild(other);
     if (c != 0) return c;
     return m_build - other.m_build;
+}
+
+GameVersionRange versionLinesToRange(const QStringList &versionLines)
+{
+    // 勾选的版本线集合（如 1.9 / 1.10 / 1.11 / 1.12）按「连续区间」语义处理：
+    // 取最小版本线的展开下界 ~ 最大版本线的展开上界。
+    GameVersion minV, maxV;
+    for (const QString &line : versionLines) {
+        const GameVersion v(line);
+        if (!v.isValid()) continue;
+        if (!minV.isValid() || v < minV) minV = v;
+        if (!maxV.isValid() || v > maxV) maxV = v;
+    }
+    if (!minV.isValid() || !maxV.isValid()) return GameVersionRange();
+
+    // GameVersionRange(lower, true, upper, true) 构造时对边界做半开展开：
+    // 下界取 minV 展开区间的 Lower（含），上界取 maxV 展开区间的 Upper（不含）。
+    // 例如 1.9 + 1.12 -> [1.9.0.0, 1.13.0.0)。
+    return GameVersionRange(minV, true, maxV, true);
 }
 
 } // namespace ckan
