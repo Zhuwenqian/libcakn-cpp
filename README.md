@@ -24,6 +24,9 @@ A C++ re-implementation of [CKAN](https://github.com/KSP-CKAN/CKAN) — the Comm
 - **Downloader / Installer** — HTTP download (mirrors, proxy, resume, 1–8 parallel tasks), miniz ZIP unzip, SHA256 content verification, install/uninstall/upgrade with file-attribution tracking and manual-mod (AD) recognition.
 - **Transactional filemanager** — atomic install/uninstall/upgrade with automatic rollback (`TxFileManager`).
 - **Game instance** — lifecycle wrapper, read-only version detection (build-ID → version mapping), manual `GameData` DLL scan.
+- **Mod pack export/import** — export installed mods as an official CKAN `*.ckan` metapackage (dependency-topological order, excludes DLC/AD); import a `.ckan`-driven zip pack (probe `GameData` prefix, clear then extract with progress & cancellation).
+- **Cross-process file lock** — mutual exclusion on `registry.locked` via exclusive lock-file creation, with stale-lock (PID) detection and takeover (`FileLock`).
+- **Cache helpers** — official CKAN cache filename, in-cache zip lookup, and required-disk-space estimation (`officialCacheFileName` / `findCacheZip` / `estimateRequiredBytes`).
 - **Facade** — `CKan` + `CKanConfig` as the single public entry point; every public class is exported via `CKAN_API`.
 
 ### Requirements
@@ -103,6 +106,9 @@ dist/              # build output (gitignored)
 - **下载/安装** —— HTTP 下载（镜像、代理、断点续传、1–8 并行）、miniz 解压、SHA256 内容校验、安装/卸载/升级的文件归属跟踪与手动模组（AD）识别。
 - **事务文件管理** —— 安装/卸载/升级原子执行，失败自动回滚（`TxFileManager`）。
 - **游戏实例** —— 生命周期封装，只读版本检测（build ID → 版本映射）、手动 `GameData` DLL 扫描。
+- **整合包导入/导出** —— 把已安装模组导出为官方 CKAN `*.ckan` 元包（依赖拓扑序，排除 DLC/自动安装/手动模组）；导入 `.ckan` 驱动的 zip 整合包（探测 `GameData` 前缀、清空后解压，带进度与取消）。
+- **跨进程文件锁** —— 以独占锁文件方式对 `registry.locked` 互斥，支持陈旧锁（PID）检测与接管（`FileLock`）。
+- **下载缓存辅助** —— 官方 CKAN 缓存文件命名、缓存内 zip 查找、所需磁盘空间估算（`officialCacheFileName` / `findCacheZip` / `estimateRequiredBytes`）。
 - **门面** —— `CKan` + `CKanConfig` 作为唯一对外入口；所有公开类经 `CKAN_API` 全量导出。
 
 ### 依赖
