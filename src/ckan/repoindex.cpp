@@ -45,13 +45,48 @@ QStringList repoMirrorUrls(const Repository &repo, const QStringList &prefixes)
     return out;
 }
 
+// 解压输出上限：仓库索引解压后不应超过 256MB（官方 CKAN-meta 约数十 MB），
+// 防止恶意/异常归档膨胀内存（解压炸弹）。
+static constexpr qint64 kMaxUncompressedBytes = 256LL * 1024 * 1024;
+// 压缩包本身大小上限：64MB（配合下载侧超时，防止异常大文件灌入）。
+static constexpr qint64 kMaxCompressedBytes = 64LL * 1024 * 1024;
+
+// 流式解压输出接收器：累计输出字节，超过上限即置 overflow 并中止解压。
+struct GunzipSink {
+    QByteArray data;
+    qint64 limit = kMaxUncompressedBytes;
+    bool overflow = false;
+};
+
+int gunzipPut(const void *buf, int len, void *user)
+{
+    GunzipSink *s = static_cast<GunzipSink *>(user);
+    if (s->data.size() + len > s->limit) {
+        s->overflow = true;
+        return 0; // 请求中止解压
+    }
+    s->data.append(static_cast<const char *>(buf), len);
+    return len;
+}
+
 // 从 gzip 格式内存数据解压为原始 tar 字节。
-bool gunzip(const QByteArray &gz, QByteArray *out)
+// 带大小上限（防解压炸弹）与 ISIZE 完整性校验（防截断/损坏）。
+bool gunzip(const QByteArray &gz, QByteArray *out, QString *error)
 {
     const quint8 *src = reinterpret_cast<const quint8 *>(gz.constData());
     const size_t len = static_cast<size_t>(gz.size());
-    if (len < 18) return false;
-    if (src[0] != 0x1f || src[1] != 0x8b || src[2] != 8) return false;
+    if (len < 18) {
+        if (error) *error = QStringLiteral("仓库归档过短（不是有效的 gzip）");
+        return false;
+    }
+    if (gz.size() > kMaxCompressedBytes) {
+        if (error) *error = QStringLiteral("仓库压缩包过大（%1 字节）").arg(gz.size());
+        return false;
+    }
+    if (src[0] != 0x1f || src[1] != 0x8b || src[2] != 8) {
+        if (error) *error = QStringLiteral("不是有效的 gzip 归档");
+        return false;
+    }
 
     size_t off = 10;
     const quint8 flags = src[3];
@@ -65,12 +100,31 @@ bool gunzip(const QByteArray &gz, QByteArray *out)
     if (flags & 0x02) off += 2;
     if (off >= len) return false;
 
-    size_t outLen = 0;
-    void *raw = tinfl_decompress_mem_to_heap(src + off, len - off, &outLen, 0);
-    if (!raw) return false;
-    out->resize(static_cast<qsizetype>(outLen));
-    memcpy(out->data(), raw, outLen);
-    mz_free(raw);
+    // 流式解压（带输出上限），raw deflate（跳过 gzip 头）。
+    GunzipSink sink;
+    size_t inBytes = len - off;
+    const int ok = tinfl_decompress_mem_to_callback(src + off, &inBytes, &gunzipPut, &sink, 0);
+    if (sink.overflow) {
+        if (error) *error = QStringLiteral("仓库索引解压超过大小上限，已拒绝");
+        return false;
+    }
+    if (!ok) {
+        if (error) *error = QStringLiteral("仓库归档解压失败（已损坏）");
+        return false;
+    }
+
+    // 完整性校验：gzip 尾部 ISIZE（未压缩大小 mod 2^32，小端序）应与实际解压大小一致。
+    // 不一致说明下载被截断/损坏（官方 CKAN 索引为单成员 gzip，ISIZE 即总大小）。
+    const quint64 isize = static_cast<quint64>(src[len - 4])
+                        | (static_cast<quint64>(src[len - 3]) << 8)
+                        | (static_cast<quint64>(src[len - 2]) << 16)
+                        | (static_cast<quint64>(src[len - 1]) << 24);
+    if (isize != static_cast<quint64>(sink.data.size())) {
+        if (error) *error = QStringLiteral("仓库归档被截断或损坏（大小校验失败）");
+        return false;
+    }
+
+    if (out) *out = sink.data;
     return true;
 }
 
@@ -121,8 +175,9 @@ bool RepoIndex::parseTarGz(const QByteArray &tarGz, QMap<QString, QVector<CkanMo
                            QMap<QString, int> *downloadCounts, QString *error)
 {
     QByteArray tar;
-    if (!gunzip(tarGz, &tar)) {
-        if (error) *error = QStringLiteral("failed to gunzip repository archive");
+    if (!gunzip(tarGz, &tar, error)) {
+        if (error && error->isEmpty())
+            *error = QStringLiteral("failed to gunzip repository archive");
         return false;
     }
     if (index) index->clear();

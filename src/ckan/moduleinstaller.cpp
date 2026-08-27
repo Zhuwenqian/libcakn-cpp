@@ -578,6 +578,11 @@ InstallResult ModuleInstaller::installFromCache(const QVector<CkanModule> &modul
                 return fail(result.error);
             }
             const QString abs = m_instance->toAbsoluteGameDir(f.destination);
+            // 防 Zip Slip：目标路径逃逸出游戏目录时拒绝写入并整体回滚
+            if (abs.isEmpty()) {
+                mz_zip_reader_end(&zip);
+                return fail(QStringLiteral("非法安装路径（越出游戏目录）：%1").arg(f.destination));
+            }
             if (!tx->writeFile(abs, content)) {
                 mz_zip_reader_end(&zip);
                 return fail(QStringLiteral("cannot write %1").arg(abs));

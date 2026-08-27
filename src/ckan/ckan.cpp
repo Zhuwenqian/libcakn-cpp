@@ -42,17 +42,56 @@ bool CKan::refreshIndex(const QVector<Repository> &repos,
                         const std::function<void(const QString &, qint64, qint64)> &onProgress,
                         std::atomic_bool *cancelFlag)
 {
-    // 镜像前缀与索引缓存目录来自构造传入的 CKanConfig
-    m_indexReady = RepoIndex::buildManyCached(repos, m_config.indexMirrorPrefixes,
-                                              &m_index, &m_downloadCounts, error,
-                                              force, maxAgeSecs, onProgress, cancelFlag,
-                                              preferMirror, m_config.indexCacheDir,
-                                              m_config.proxyUrl);
+    // 镜像前缀与索引缓存目录来自构造传入的 CKanConfig。
+    // 在后台线程执行：先构建到局部变量（下载/解压/解析为长耗时操作，不能持锁），
+    // 完成后在锁内一次性交换进 m_index / m_downloadCounts，保证其他线程读取到的
+    // 始终是完整一致的索引快照（避免 QMap 并发读写数据竞争与半成品索引泄漏）。
+    QMap<QString, QVector<CkanModule>> newIndex;
+    QMap<QString, int> newCounts;
+    QString err;
+    const bool ok = RepoIndex::buildManyCached(repos, m_config.indexMirrorPrefixes,
+                                               &newIndex, &newCounts, &err,
+                                               force, maxAgeSecs, onProgress, cancelFlag,
+                                               preferMirror, m_config.indexCacheDir,
+                                               m_config.proxyUrl);
+    QMutexLocker locker(&m_indexMutex);
+    if (ok) {
+        m_index = std::move(newIndex);
+        m_downloadCounts = std::move(newCounts);
+    }
+    m_indexReady = ok;
+    if (error) *error = err;
+    return ok;
+}
+
+bool CKan::indexReady() const
+{
+    QMutexLocker locker(&m_indexMutex);
     return m_indexReady;
+}
+
+int CKan::indexSize() const
+{
+    QMutexLocker locker(&m_indexMutex);
+    return static_cast<int>(m_index.size());
+}
+
+int CKan::downloadCount(const QString &identifier) const
+{
+    QMutexLocker locker(&m_indexMutex);
+    return m_downloadCounts.value(identifier, -1);
+}
+
+bool CKan::hasDownloadCount(const QString &identifier) const
+{
+    QMutexLocker locker(&m_indexMutex);
+    return m_downloadCounts.contains(identifier);
 }
 
 QVector<CkanModule> CKan::search(const QString &query) const
 {
+    // 索引可能正被后台刷新线程替换：整段迭代持锁，防止读到被并发改写中的 QMap。
+    QMutexLocker locker(&m_indexMutex);
     QVector<CkanModule> out;
     const QString q = query.trimmed().toLower();
     for (auto it = m_index.constBegin(); it != m_index.constEnd(); ++it) {
@@ -75,16 +114,19 @@ QVector<CkanModule> CKan::search(const QString &query) const
 
 QVector<CkanModule> CKan::versionsOf(const QString &identifier) const
 {
+    QMutexLocker locker(&m_indexMutex);
     return RepoIndex::versionsFor(m_index, identifier);
 }
 
 CkanModule CKan::latestOf(const QString &identifier) const
 {
+    QMutexLocker locker(&m_indexMutex);
     return RepoIndex::latestFor(m_index, identifier);
 }
 
 QStringList CKan::allIdentifiers() const
 {
+    QMutexLocker locker(&m_indexMutex);
     return m_index.keys();
 }
 
@@ -192,15 +234,26 @@ QByteArray CKan::exportModpackCkan(QString *error)
     // 先重载注册表，确保拿到最新的已安装数据
     reloadRegistry();
 
+    // 索引可能在后台线程被刷新替换：锁内快照标识符集合，避免持引用访问被换掉的 QMap。
+    QSet<QString> indexIds;
+    bool indexLoaded = false;
+    {
+        QMutexLocker locker(&m_indexMutex);
+        if (m_indexReady && !m_index.isEmpty()) {
+            for (auto it = m_index.constBegin(); it != m_index.constEnd(); ++it)
+                indexIds.insert(it.key());
+            indexLoaded = true;
+        }
+    }
+
     // 收集待导出模组：排除 DLC / 自动安装 / 手动安装（AD）模组；
     // 索引已加载时同样排除索引中不存在的模组（无法从仓库重新安装，参照官方 IsAvailable）
-    const bool indexLoaded = m_indexReady && !m_index.isEmpty();
     QVector<CkanModule> mods;
     const QVector<InstalledModule> installed = installedModules();
     for (const InstalledModule &im : installed) {
         if (im.module.isDlc() || im.autoInstalled || isAutoDetected(im.identifier))
             continue;
-        if (indexLoaded && !m_index.contains(im.identifier))
+        if (indexLoaded && !indexIds.contains(im.identifier))
             continue;
         mods.append(im.module);
     }
@@ -270,7 +323,14 @@ ResolutionResult CKan::resolveInstallMany(const QVector<CkanModule> &mods,
                                           bool withSuggests,
                                           const GameVersionRange &extraRange)
 {
-    RelationshipResolver resolver(m_index);
+    // RelationshipResolver 内部持有索引的 const 引用；索引可能在后台线程被刷新替换
+    // （交换后旧 QMap 被销毁），故锁内拷贝一份传给解析器，杜绝悬垂引用。
+    QMap<QString, QVector<CkanModule>> indexCopy;
+    {
+        QMutexLocker locker(&m_indexMutex);
+        indexCopy = m_index;
+    }
+    RelationshipResolver resolver(indexCopy);
     // 传入当前实例检测到的 KSP 版本，候选按兼容性过滤（无效版本视为不过滤）；
     // extraRange 为用户勾选的额外兼容区间（无效表示未启用）。
     return resolver.resolve(mods, *m_instance.registry(), autoInstallRecommends, withSuggests,

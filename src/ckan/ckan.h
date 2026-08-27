@@ -54,12 +54,12 @@ public:
     QVector<CkanModule> search(const QString &query) const;    // 按名称/标识符搜索
     QVector<CkanModule> versionsOf(const QString &identifier) const;
     CkanModule latestOf(const QString &identifier) const;
-    bool indexReady() const { return m_indexReady; }
-    int  indexSize() const { return static_cast<int>(m_index.size()); }
+    bool indexReady() const;
+    int  indexSize() const;
     QStringList allIdentifiers() const;   // 索引中全部标识符（用于精确清理下载缓存）
     // 某标识符的下载次数（来自仓库 download_counts.json）；无数据返回 -1
-    int  downloadCount(const QString &identifier) const { return m_downloadCounts.value(identifier, -1); }
-    bool hasDownloadCount(const QString &identifier) const { return m_downloadCounts.contains(identifier); }
+    int  downloadCount(const QString &identifier) const;
+    bool hasDownloadCount(const QString &identifier) const;
 
     // ---- 已安装查询 ----
     QString installedVersion(const QString &identifier) const;
@@ -153,6 +153,9 @@ private:
     ModuleInstaller *m_installer = nullptr;
     std::function<void(const QString &, qint64, qint64, qint64)> m_byteProgress;
     std::function<void(const QString &, int)> m_installProgress;
+    // 保护 m_index / m_downloadCounts / m_indexReady（索引刷新在后台线程写、
+    // search/latestOf 等在 UI 线程读，需加锁避免 QMap 并发读写数据竞争）。
+    mutable QMutex m_indexMutex;
     QMap<QString, QVector<CkanModule>> m_index;
     QMap<QString, int> m_downloadCounts; // identifier -> 下载次数（高优先级仓库优先）
     bool m_indexReady = false;

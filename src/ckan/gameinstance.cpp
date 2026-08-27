@@ -197,7 +197,13 @@ QString GameInstance::toAbsoluteGameDir(const QString &rel) const
 {
     QString r = normalized(rel);
     while (r.startsWith(QLatin1Char('/'))) r = r.mid(1);
-    return normalized(m_gameDir + (r.isEmpty() ? QString() : QStringLiteral("/") + r));
+    // 防 Zip Slip：规范化（折叠 ..）后必须仍位于游戏目录内，
+    // 否则视为非法路径（返回空，调用方应拒绝写入/删除）。
+    const QString base = normalized(m_gameDir);
+    const QString abs = normalized(m_gameDir + (r.isEmpty() ? QString() : QStringLiteral("/") + r));
+    if (abs != base && !abs.startsWith(base + QLatin1Char('/')))
+        return QString();
+    return abs;
 }
 
 QMap<QString, QString> GameInstance::scanUnmanagedDlls() const
@@ -325,6 +331,10 @@ void GameInstance::loadRegistry()
         QString err;
         m_registry = Registry::fromJson(f.readAll(), &err);
         f.close();
+    } else {
+        // 注册表文件不存在（含被删除的整合包导入场景）：内存态必须重置为空，
+        // 否则被清空的暂存数据仍滞留内存，导致后续安装与文件归属冲突判断失真。
+        m_registry = Registry();
     }
     m_registryLoaded = true;
 }

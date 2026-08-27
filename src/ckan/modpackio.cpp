@@ -190,6 +190,7 @@ bool modpackImportGameData(const QString &zipPath, const QString &gameDir,
     }
 
     // 预扫描：统计 GameData 下待解压文件的总字节数，用于进度。
+    // 同时校验条目路径安全性（防 Zip Slip）：规范化后必须仍位于 GameData 内。
     const QString prefixUtf8 = prefix.toUtf8();
     const mz_uint count = mz_zip_reader_get_num_files(&zip);
     qint64 totalBytes = 0;
@@ -202,9 +203,21 @@ bool modpackImportGameData(const QString &zipPath, const QString &gameDir,
         const QString name = QString::fromUtf8(st.m_filename);
         if (!name.startsWith(prefix) || st.m_is_directory)
             continue;
+        // 防 Zip Slip：条目名规范化（折叠 ..、统一分隔符）后
+        // 不得为空、不得为绝对路径、不得逃逸出 GameData。
+        QString rel = name.mid(prefixUtf8.size());
+        rel.replace(QLatin1Char('\\'), QLatin1Char('/'));
+        const QString cleaned = QDir::cleanPath(rel);
+        if (cleaned.isEmpty() || cleaned == QStringLiteral("..")
+            || cleaned.startsWith(QStringLiteral("../"))
+            || QFileInfo(cleaned).isAbsolute()) {
+            mz_zip_reader_end(&zip);
+            if (error) *error = QStringLiteral("整合包包含不安全的文件路径：%1").arg(name);
+            return false;
+        }
         totalBytes += static_cast<qint64>(st.m_uncomp_size);
         targets.append(i);
-        relPaths.append(name.mid(prefixUtf8.size()));
+        relPaths.append(cleaned);
     }
 
     // 先清空现有 GameData（保留官方文件夹），再解压。
@@ -249,7 +262,14 @@ bool modpackImportGameData(const QString &zipPath, const QString &gameDir,
         }
 
         const QString relPath = relPaths[idx];
-        const QString absPath = targetData.filePath(relPath);
+        // 防 Zip Slip（纵深防御）：解压目标必须位于 GameData 目录内。
+        const QString absPath = QDir::cleanPath(targetData.filePath(relPath));
+        if (!absPath.startsWith(targetData.absolutePath() + QLatin1Char('/'))) {
+            mz_free(mem);
+            mz_zip_reader_end(&zip);
+            if (error) *error = QStringLiteral("解压目标超出 GameData：%1").arg(relPath);
+            return false;
+        }
         const QDir parent = QFileInfo(absPath).absoluteDir();
         if (!parent.exists() && !parent.mkpath(QStringLiteral("."))) {
             mz_free(mem);
