@@ -61,6 +61,14 @@ public:
     void setProxyUrl(const QString &proxyUrl);
     QString proxyUrl() const { return m_proxyUrl; }
 
+    // 设置单链接下载限速（字节/秒，0=不限速）。负数按 0 处理。
+    // 每次 download*() 调用前设置；对本下载器的（当前及后续）连接有效。
+    void setDownloadRate(qint64 bytesPerSecond)
+    {
+        m_bytesPerSecond = bytesPerSecond > 0 ? bytesPerSecond : 0;
+    }
+    qint64 downloadRate() const { return m_bytesPerSecond; }
+
 signals:
     void finished(const QByteArray &data, const QString &url);
     void failed(const QString &url, const QString &error);
@@ -73,6 +81,7 @@ private:
     int m_attempt = 0;
     QString m_currentUrl;
     bool m_async = false;
+    qint64 m_bytesPerSecond = 0; // 下载限速（字节/秒，0=不限速）
 
     void startAttempt();
 };

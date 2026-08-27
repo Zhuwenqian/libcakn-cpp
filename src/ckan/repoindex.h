@@ -34,19 +34,22 @@ public:
     // 非 GitHub 仓库忽略镜像，避免错误回退到其他仓库的内容。
     // preferMirror=true 时镜像优先（否则官方优先）。
     // proxyUrl 为该次下载使用的代理（空=直连），替代原全局静态配置。
+    // rateLimitBps 为该次下载的单链接限速（字节/秒，0=不限速）。
     static bool build(const Repository &repo, const QStringList &mirrors,
                       QMap<QString, QVector<CkanModule>> *index,
                       QMap<QString, int> *downloadCounts = nullptr, QString *error = nullptr,
                       const std::function<void(const QString &, qint64, qint64)> &onProgress = {},
                       std::atomic_bool *cancelFlag = nullptr,
                       bool preferMirror = false,
-                      const QString &proxyUrl = QString());
+                      const QString &proxyUrl = QString(),
+                      qint64 rateLimitBps = 0);
 
     // 带缓存的构建：优先使用缓存（fresh 且未强制刷新时），否则下载并写入缓存。
     // 下载失败时回退到旧缓存（即使已过期），避免单仓库故障导致整体失败。
     // mirrors 语义同 build()：镜像前缀列表，仅对 GitHub 托管的仓库生效。
     // maxAgeSecs 为缓存有效期（秒），默认 6 小时。
     // cacheDir 为索引缓存目录（空=不落盘缓存）；proxyUrl 为该次下载使用的代理（空=直连）。
+    // rateLimitBps 为该次下载的单链接限速（字节/秒，0=不限速）。
     static bool buildCached(const Repository &repo, const QStringList &mirrors,
                             QMap<QString, QVector<CkanModule>> *index,
                             QMap<QString, int> *downloadCounts = nullptr, QString *error = nullptr,
@@ -55,7 +58,8 @@ public:
                             std::atomic_bool *cancelFlag = nullptr,
                             bool preferMirror = false,
                             const QString &cacheDir = QString(),
-                            const QString &proxyUrl = QString());
+                            const QString &proxyUrl = QString(),
+                            qint64 rateLimitBps = 0);
 
     // 多仓库构建：依次处理每个仓库（按 priority 升序，值越小优先级越高，先处理者获胜），
     // 将各仓库的模块版本与下载次数合并。同 identifier+version 冲突时高优先级仓库优先；
@@ -64,6 +68,7 @@ public:
     // mirrors 语义同 build()：镜像前缀列表，仅对 GitHub 托管的仓库生效。
     // onProgress 额外携带仓库名，便于区分当前下载的仓库。
     // cacheDir 为索引缓存目录（空=不落盘缓存）；proxyUrl 为该次下载使用的代理（空=直连）。
+    // rateLimitBps 为该次下载的单链接限速（字节/秒，0=不限速）。
     static bool buildManyCached(const QVector<Repository> &repos, const QStringList &mirrors,
                                 QMap<QString, QVector<CkanModule>> *index,
                                 QMap<QString, int> *downloadCounts = nullptr,
@@ -74,7 +79,8 @@ public:
                                 std::atomic_bool *cancelFlag = nullptr,
                                 bool preferMirror = false,
                                 const QString &cacheDir = QString(),
-                                const QString &proxyUrl = QString());
+                                const QString &proxyUrl = QString(),
+                                qint64 rateLimitBps = 0);
 
     // 便捷：取某 identifier 的全部版本（按版本降序）
     static QVector<CkanModule> versionsFor(const QMap<QString, QVector<CkanModule>> &index,

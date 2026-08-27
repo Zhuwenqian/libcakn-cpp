@@ -34,6 +34,10 @@ public:
     void setProxyUrl(const QString &proxyUrl);
     QString proxyUrl() const { return m_proxyUrl; }
 
+    // 单链接下载限速（字节/秒，0=不限速），作用于本安装器的所有模块下载。
+    void setDownloadRateLimitBps(qint64 bps) { m_downloadRateLimitBps = bps > 0 ? bps : 0; }
+    qint64 downloadRateLimitBps() const { return m_downloadRateLimitBps; }
+
     // 安装一批模块（已由解析器展开依赖）。downloadDir 为 zip 缓存目录。
     // 便捷入口：先 downloadModules 下载全部，再 installFromCache 写入。
     InstallResult install(const QVector<CkanModule> &modules,
@@ -112,6 +116,7 @@ signals:
 private:
     GameInstance *m_instance;
     QString m_proxyUrl;
+    qint64 m_downloadRateLimitBps = 0; // 单链接下载限速（字节/秒，0=不限速）
     std::atomic_bool m_cancelRequested{false};
 
     // 单个模组下载任务（并行下载 worker 的输入）

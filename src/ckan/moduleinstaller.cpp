@@ -391,6 +391,7 @@ ModuleInstaller::DownloadOutcome ModuleInstaller::downloadOneTask(
     }
 
     Downloader dl;
+    dl.setDownloadRate(m_downloadRateLimitBps);
     QByteArray data;
     QString err;
     const QString expectedSha256 = task.mod.downloadHash.sha256;

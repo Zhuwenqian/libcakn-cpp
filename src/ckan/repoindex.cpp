@@ -209,10 +209,11 @@ bool RepoIndex::build(const Repository &repo, const QStringList &mirrors,
                       QMap<QString, int> *downloadCounts, QString *error,
                       const std::function<void(const QString &, qint64, qint64)> &onProgress,
                       std::atomic_bool *cancelFlag, bool preferMirror,
-                      const QString &proxyUrl)
+                      const QString &proxyUrl, qint64 rateLimitBps)
 {
     Downloader dl;
     dl.setProxyUrl(proxyUrl);
+    dl.setDownloadRate(rateLimitBps);
     QByteArray data;
     const auto progress = [&onProgress, &repo](qint64 received, qint64 total) {
         if (onProgress) onProgress(repo.name, received, total);
@@ -230,12 +231,13 @@ bool RepoIndex::buildCached(const Repository &repo, const QStringList &mirrors,
                             bool forceRefresh, qint64 maxAgeSecs,
                             const std::function<void(const QString &, qint64, qint64)> &onProgress,
                             std::atomic_bool *cancelFlag, bool preferMirror,
-                            const QString &cacheDir, const QString &proxyUrl)
+                            const QString &cacheDir, const QString &proxyUrl,
+                            qint64 rateLimitBps)
 {
     // 未配置缓存目录：退回每次下载
     if (cacheDir.isEmpty())
         return build(repo, mirrors, index, downloadCounts, error, onProgress,
-                     cancelFlag, preferMirror, proxyUrl);
+                     cancelFlag, preferMirror, proxyUrl, rateLimitBps);
 
     QDir().mkpath(cacheDir);
     const QString cacheFile = QDir(cacheDir).filePath(safeRepoName(repo.name) + QStringLiteral(".tar.gz"));
@@ -259,6 +261,7 @@ bool RepoIndex::buildCached(const Repository &repo, const QStringList &mirrors,
     // 下载并写入缓存
     Downloader dl;
     dl.setProxyUrl(proxyUrl);
+    dl.setDownloadRate(rateLimitBps);
     QByteArray data;
     const auto progress = [&onProgress, &repo](qint64 received, qint64 total) {
         if (onProgress) onProgress(repo.name, received, total);
@@ -290,7 +293,8 @@ bool RepoIndex::buildManyCached(const QVector<Repository> &repos, const QStringL
                                 bool forceRefresh, qint64 maxAgeSecs,
                                 const std::function<void(const QString &, qint64, qint64)> &onProgress,
                                 std::atomic_bool *cancelFlag, bool preferMirror,
-                                const QString &cacheDir, const QString &proxyUrl)
+                                const QString &cacheDir, const QString &proxyUrl,
+                                qint64 rateLimitBps)
 {
     if (index) index->clear();
     if (downloadCounts) downloadCounts->clear();
@@ -317,7 +321,7 @@ bool RepoIndex::buildManyCached(const QVector<Repository> &repos, const QStringL
         const bool ok = buildCached(repo, mirrors, &subIndex, &subCount, &repoErr,
                                     forceRefresh, maxAgeSecs,
                                     onProgress,
-                                    cancelFlag, preferMirror, cacheDir, proxyUrl);
+                                    cancelFlag, preferMirror, cacheDir, proxyUrl, rateLimitBps);
         if (!ok) {
             failed << QStringLiteral("%1: %2").arg(repo.name, repoErr);
             continue;

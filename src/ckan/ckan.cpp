@@ -2,13 +2,21 @@
 
 #include <QSet>
 #include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QRegularExpression>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QCryptographicHash>
 #include <algorithm>
 
 #include "repoindex.h"
 #include "relationshipresolver.h"
 #include "moduleinstaller.h"
 #include "txfilemanager.h"
+#include "miniz.h"
 
 namespace ckan {
 
@@ -53,7 +61,8 @@ bool CKan::refreshIndex(const QVector<Repository> &repos,
                                                &newIndex, &newCounts, &err,
                                                force, maxAgeSecs, onProgress, cancelFlag,
                                                preferMirror, m_config.indexCacheDir,
-                                               m_config.proxyUrl);
+                                               m_config.proxyUrl,
+                                               m_config.downloadRateLimitBps);
     QMutexLocker locker(&m_indexMutex);
     if (ok) {
         m_index = std::move(newIndex);
@@ -297,6 +306,171 @@ QByteArray CKan::exportModpackCkan(QString *error)
     return meta.toJson();
 }
 
+bool CKan::writeHistorySnapshot(QString *error)
+{
+    const auto fail = [&](const QString &e) {
+        if (error) *error = e;
+        return false;
+    };
+    // 先重载注册表，确保拿到最新的已安装数据。
+    reloadRegistry();
+
+    // 空实例不生成空快照。
+    const QVector<InstalledModule> installed = installedModules();
+    if (installed.isEmpty())
+        return true;
+
+    // 构建官方 history 元包（含版本），官方对应 RegistryManager 的 changeset 快照：
+    // 每次安装/卸载/升级提交后在此目录落一个时间戳快照，便于回溯。
+    const QString instanceName = m_instance.name();
+    const QDateTime now = QDateTime::currentDateTime();
+
+    QJsonArray depends;
+    for (const InstalledModule &im : installed) {
+        QJsonObject entry;
+        entry.insert(QStringLiteral("name"), im.identifier);
+        entry.insert(QStringLiteral("version"), im.module.version);
+        depends.append(entry);
+    }
+
+    QJsonObject root;
+    root.insert(QStringLiteral("spec_version"), QStringLiteral("v1.6"));
+    root.insert(QStringLiteral("identifier"), QString());
+    root.insert(QStringLiteral("name"), QStringLiteral("已安装-%1").arg(instanceName));
+    root.insert(QStringLiteral("abstract"),
+                QStringLiteral("已安装在 KSP 实例 %1 的模组列表").arg(instanceName));
+    root.insert(QStringLiteral("author"), QString::fromLocal8Bit(qgetenv("USERNAME")));
+    root.insert(QStringLiteral("version"), now.toString(QStringLiteral("yyyy.MM.dd.HH.mm.ss")));
+    root.insert(QStringLiteral("license"), QStringLiteral("unknown"));
+    root.insert(QStringLiteral("depends"), depends);
+    root.insert(QStringLiteral("release_date"), now.toString(Qt::ISODate));
+    root.insert(QStringLiteral("kind"), QStringLiteral("metapackage"));
+
+    // ksp_version_min/max 写检测到的游戏版本线（去掉 build，如 1.12.5.3190 -> 1.12.5）
+    const GameVersion detected = detectedVersion();
+    if (detected.isValid()) {
+        QStringList parts = detected.toString().split(QLatin1Char('.'));
+        while (parts.size() > 3) parts.removeLast();
+        const QString versionLine = parts.join(QLatin1Char('.'));
+        root.insert(QStringLiteral("ksp_version_min"), versionLine);
+        root.insert(QStringLiteral("ksp_version_max"), versionLine);
+    }
+
+    QDir dir(m_instance.historyDir());
+    if (!dir.exists() && !dir.mkpath(QStringLiteral(".")))
+        return fail(QStringLiteral("无法创建历史目录：%1").arg(dir.absolutePath()));
+
+    const QString fname = QStringLiteral("已安装-%1-%2.ckan")
+                              .arg(instanceName, now.toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss")));
+    QFile f(dir.filePath(fname));
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return fail(QStringLiteral("无法写入历史快照：%1").arg(f.fileName()));
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    f.close();
+
+    // 修剪：只保留最近 kMaxHistoryCount 条（文件名按时间排序，直接按字典序取末尾 N 条）。
+    QStringList files = dir.entryList({QStringLiteral("*.ckan")}, QDir::Files, QDir::Name);
+    while (files.size() > kMaxHistoryCount)
+        QFile::remove(dir.filePath(files.takeFirst()));
+    return true;
+}
+
+CkanModule CKan::importModuleFile(const QString &path, bool *isMetapackage, QString *error)
+{
+    const auto fail = [&](const QString &e) {
+        if (error) *error = e;
+        return CkanModule();
+    };
+    if (isMetapackage) *isMetapackage = false;
+
+    const QString lower = path.toLower();
+    // .ckan 文件：直接按 JSON 解析元数据。
+    if (lower.endsWith(QStringLiteral(".ckan"))) {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly))
+            return fail(QStringLiteral("无法打开文件：%1").arg(path));
+        const QByteArray bytes = f.readAll();
+        QString perr;
+        CkanModule mod = CkanModule::fromJson(bytes, &perr);
+        if (!mod.isValid())
+            return fail(QStringLiteral(".ckan 元数据解析失败：%1").arg(perr));
+        if (isMetapackage && (mod.kind == ModuleKind::Metapackage
+                              || (mod.install.isEmpty() && !mod.depends.isEmpty())))
+            *isMetapackage = true;
+        return mod;
+    }
+
+    // .zip：完整读入内存后用 miniz 打开（避免按 ANSI 代码页解析非 ASCII 路径），
+    // 扫描压缩包内的 *.ckan 元数据。
+    QFile zf(path);
+    if (!zf.open(QIODevice::ReadOnly))
+        return fail(QStringLiteral("无法打开文件：%1").arg(path));
+    const QByteArray zipData = zf.readAll();
+    if (zipData.isEmpty())
+        return fail(QStringLiteral("文件内容为空：%1").arg(path));
+
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_reader_init_mem(&zip, zipData.constData(), zipData.size(), 0))
+        return fail(QStringLiteral("无法解析 ZIP 文件"));
+    CkanModule found;
+    const mz_uint count = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < count && !found.isValid(); ++i) {
+        mz_zip_archive_file_stat st;
+        if (!mz_zip_reader_file_stat(&zip, i, &st)) continue;
+        const QString entry = QString::fromUtf8(st.m_filename);
+        if (!entry.endsWith(QStringLiteral(".ckan"), Qt::CaseInsensitive)) continue;
+        size_t size = 0;
+        void *mem = mz_zip_reader_extract_to_heap(&zip, i, &size, 0);
+        if (!mem) continue;
+        const QByteArray ckanBytes(static_cast<const char *>(mem), static_cast<int>(size));
+        mz_free(mem);
+        QString perr;
+        const CkanModule m = CkanModule::fromJson(ckanBytes, &perr);
+        if (!m.isValid()) continue;
+        // 取第一个"真正可安装"的模组（跳过元包、无 install 且无 depends 的壳）。
+        if (m.kind == ModuleKind::Metapackage) continue;
+        if (m.install.isEmpty() && m.depends.isEmpty()) continue;
+        found = m;
+    }
+    mz_zip_reader_end(&zip);
+    if (found.isValid())
+        return found;
+
+    // 无内部 .ckan：用文件 SHA256 匹配仓库已知下载哈希（对齐官方 ModuleImporter 的 hash 匹配）。
+    const QString fileSha = QString::fromLatin1(
+        QCryptographicHash::hash(zipData, QCryptographicHash::Sha256).toHex()).toUpper();
+    {
+        QMutexLocker locker(&m_indexMutex);
+        for (auto it = m_index.constBegin(); it != m_index.constEnd(); ++it)
+            for (const CkanModule &m : it.value())
+                if (!m.downloadHash.sha256.isEmpty()
+                    && m.downloadHash.sha256.compare(fileSha, Qt::CaseInsensitive) == 0)
+                    return m;
+    }
+    return fail(QStringLiteral("ZIP 内未找到 .ckan 元数据，且与仓库已知模组不匹配"));
+}
+
+QString CKan::importStoreCache(const CkanModule &mod, const QString &sourcePath,
+                               const QString &downloadDir, QString *error)
+{
+    const auto fail = [&](const QString &e) {
+        if (error) *error = e;
+        return QString();
+    };
+    QDir dir(downloadDir);
+    if (!dir.exists() && !dir.mkpath(QStringLiteral(".")))
+        return fail(QStringLiteral("无法创建缓存目录：%1").arg(downloadDir));
+    // 本启动器原生缓存命名 {id}_{safeVersion}.zip，让 findCacheZip 能命中复用。
+    const QString dest = dir.filePath(mod.identifier + QLatin1Char('_')
+                                      + ModuleInstaller::safeCacheFileName(mod.version)
+                                      + QStringLiteral(".zip"));
+    QFile::remove(dest); // 覆盖旧文件
+    if (!QFile::copy(sourcePath, dest))
+        return fail(QStringLiteral("无法复制导入文件到缓存：%1").arg(dest));
+    return dest;
+}
+
 void CKan::scanUnmanagedDlls()
 {
     Registry *reg = m_instance.registry();
@@ -343,6 +517,7 @@ ModuleInstaller *CKan::ensureInstaller()
     if (!m_installer) {
         m_installer = new ModuleInstaller(&m_instance);
         m_installer->setProxyUrl(m_config.proxyUrl);
+        m_installer->setDownloadRateLimitBps(m_config.downloadRateLimitBps);
         // 把安装器的字节进度信号桥接到 m_byteProgress 回调（下载在后台线程执行）
         QObject::connect(m_installer, &ModuleInstaller::byteProgress, m_installer,
                          [this](const QString &id, qint64 done, qint64 total, qint64 speed) {
@@ -444,6 +619,7 @@ InstallResult CKan::uninstall(const QString &identifier)
 {
     ModuleInstaller installer(&m_instance);
     installer.setProxyUrl(m_config.proxyUrl);
+    installer.setDownloadRateLimitBps(m_config.downloadRateLimitBps);
     return installer.uninstall(identifier);
 }
 

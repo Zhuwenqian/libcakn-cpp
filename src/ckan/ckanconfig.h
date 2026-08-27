@@ -18,6 +18,7 @@ struct CKAN_API CKanConfig {
     QStringList indexMirrorPrefixes;   // 索引下载镜像前缀（仅 GitHub 托管仓库生效）
     QStringList moduleMirrorPrefixes;  // 模组下载镜像前缀
     int downloadConcurrency = 3;       // 模组并行下载数
+    qint64 downloadRateLimitBps = 0;   // 单链接下载限速（字节/秒，0=不限速）
 
     // 内置默认镜像前缀（官方优先，镜像回退）
     static inline QStringList defaultIndexMirrorPrefixes()

@@ -36,6 +36,7 @@ public:
 
     // ---- 实例基本信息（不暴露 GameInstance） ----
     QString gameDir() const;
+    QString historyDir() const { return m_instance.historyDir(); } // 安装历史目录：实例/CKAN/history
     GameVersion detectedVersion() const;   // 当前实例实际检测到的 KSP 版本（失败返回无效版本）
     void reloadRegistry();                 // 重新从 registry.json 加载已安装数据
 
@@ -72,6 +73,26 @@ public:
     // 排序为依赖在前（拓扑序）。无可导出模组时返回空并填充 error。
     // 检测不到 KSP 版本时省略 ksp_version_min/max（不视为失败）。
     QByteArray exportModpackCkan(QString *error = nullptr);
+
+    // ---- 安装历史 ----
+    // 生成安装历史快照：把当前已安装模组（含版本）以官方 history 元包格式写入
+    // 实例/CKAN/history/已安装-{实例}-{时间戳}.ckan，且只保留最近 kMaxHistoryCount 条。
+    // 供每次安装/卸载/升级提交成功后调用（尽力而为，失败填充 error 不抛异常）。
+    bool writeHistorySnapshot(QString *error = nullptr);
+
+    // ---- 导入单模组文件 ----
+    // 从本地 .zip 或 .ckan 文件解析出一个模组（CkanModule）。
+    //  - .ckan：直接按 JSON 解析；kind=metapackage 或无 install 规则但含 depends 时 isMetapackage=true。
+    //  - .zip：先扫描压缩包内的 *.ckan 元数据；都找不到再用文件 SHA256 匹配仓库已知下载哈希；
+    //    仍不匹配则失败并填充 error（对齐官方 ModuleImporter 的"无元数据拒绝"行为）。
+    // 解析失败返回无效模块并填充 error。
+    CkanModule importModuleFile(const QString &path, bool *isMetapackage = nullptr,
+                                QString *error = nullptr);
+    // 把导入的本地文件复制进缓存目录 downloadDir（以本启动器 {id}_{safeVersion}.zip 命名，
+    // 使 installFromCache 的 findCacheZip 能命中），供 "仓库无此模组" 的场景直接安装。
+    // 返回写入的缓存路径；失败返回空并填充 error。
+    QString importStoreCache(const CkanModule &mod, const QString &sourcePath,
+                             const QString &downloadDir, QString *error = nullptr);
 
     // ---- 手动安装模组（DLL 扫描，AD） ----
     // 扫描 GameData 下 .dll 写入 registry.installedDlls 并保存；
@@ -160,6 +181,9 @@ private:
     QMap<QString, int> m_downloadCounts; // identifier -> 下载次数（高优先级仓库优先）
     bool m_indexReady = false;
     bool m_dllsScanned = false;   // 当前实例的 DLL 扫描结果缓存标记
+
+    // 安装历史最多保留的快照条数（超出时按时间修剪最早的）。
+    static const int kMaxHistoryCount = 200;
 };
 
 } // namespace ckan
