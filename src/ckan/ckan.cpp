@@ -10,6 +10,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QCryptographicHash>
+#include <QCoreApplication>
 #include <algorithm>
 
 #include "repoindex.h"
@@ -516,6 +517,11 @@ ModuleInstaller *CKan::ensureInstaller()
     QMutexLocker locker(&m_installerMutex);
     if (!m_installer) {
         m_installer = new ModuleInstaller(&m_instance);
+        // 关键：让安装器归属主线程。下载/安装的 byteProgress/installProgress 信号由
+        // 线程池线程发出，AutoConnection 会把排队槽投递到接收对象的归属线程。若安装器
+        // 归属某个无事件循环的 worker 线程（惰性创建时所在线程），进度回调永远得不到
+        // 派发，导致进度条不走。显式移到主线程，确保进度回落到 UI 线程。
+        m_installer->moveToThread(QCoreApplication::instance()->thread());
         m_installer->setProxyUrl(m_config.proxyUrl);
         m_installer->setDownloadRateLimitBps(m_config.downloadRateLimitBps);
         // 把安装器的字节进度信号桥接到 m_byteProgress 回调（下载在后台线程执行）
