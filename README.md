@@ -1,4 +1,4 @@
-# libcakn-cpp
+# libckan-cpp
 
 A C++ re-implementation of [CKAN](https://github.com/KSP-CKAN/CKAN) — The Comprehensive Kerbal Archive Network **library** for *Kerbal Space Program*. Quicker and smaller than the original.
 
