@@ -37,6 +37,8 @@ set(CKAN_SOURCES
     src/ckan/relationshipresolver.cpp
     src/ckan/moduleinstaller.cpp
     src/ckan/txfilemanager.cpp
+    src/ckan/filelock.cpp
+    src/ckan/modpackio.cpp
     src/ckan/ckan.cpp
     thirdparty/miniz.c
 )
@@ -56,6 +58,8 @@ set(CKAN_HEADERS
     src/ckan/relationshipresolver.h
     src/ckan/moduleinstaller.h
     src/ckan/txfilemanager.h
+    src/ckan/filelock.h
+    src/ckan/modpackio.h
     src/ckan/ckanconfig.h
     src/ckan/ckan.h
     thirdparty/miniz.h
@@ -69,6 +73,9 @@ target_compile_definitions(libckan PRIVATE
     CKAN_BUILD_SHARED
     CKAN_BUILDING_LIB
 )
+# miniz.c 是 C 文件，须与 C++ 源同样 -O3 优化（CMAKE_C_FLAGS_RELEASE 默认空，
+# 否则解压核心以 -O0 编译，体积膨胀且性能差）。
+target_compile_options(libckan PRIVATE $<$<CONFIG:Release>:-O3;-DNDEBUG>)
 # 收窄公开 include：只暴露库自身头文件目录；src/ 与 thirdparty/ 仅内部使用。
 target_include_directories(libckan PUBLIC
     ${CMAKE_SOURCE_DIR}/src/ckan

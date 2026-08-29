@@ -303,6 +303,64 @@ GameVersion GameInstance::detectVersionFromDir(const QString &gameDir)
     return GameVersion();
 }
 
+QStringList GameInstance::detectInstallKindTags(const QString &gameDir, bool *corrupted)
+{
+    QStringList tags;
+    if (corrupted) *corrupted = false;
+
+    QDir gd(gameDir + QStringLiteral("/GameData"));
+    if (!gd.exists()) {
+        if (corrupted) *corrupted = true;
+        return tags;
+    }
+
+    const QStringList dirs = gd.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+
+    bool hasSquad = false;   // Squad 为游戏运行必需目录
+    bool hasOther = false;   // 除官方目录与已知模组外的其它第三方目录
+    bool rss = false, sol = false, ro = false, rp1 = false;
+    for (const QString &d : dirs) {
+        const QString low = d.toLower();   // 目录匹配不区分大小写
+        if (low == QStringLiteral("squad"))           { hasSquad = true; continue; }
+        if (low == QStringLiteral("squadexpansion"))  continue;            // 官方扩展目录
+        if (low == QStringLiteral("realsolarsystem")) { rss = true; continue; }
+        if (low == QStringLiteral("sol-configs"))     { sol = true; continue; }
+        if (low == QStringLiteral("realismoverhaul")) { ro  = true; continue; }
+        if (low == QStringLiteral("rp-1"))            { rp1 = true; continue; }
+        hasOther = true;
+    }
+
+    // 缺少必需目录视为游戏安装损坏
+    if (!hasSquad) {
+        if (corrupted) *corrupted = true;
+        return tags;
+    }
+
+    // 固定顺序：RSS → Sol → RO → RP-1
+    if (rss) tags << QStringLiteral("RSS");
+    if (sol) tags << QStringLiteral("Sol");
+    if (ro)  tags << QStringLiteral("RO");
+    if (rp1) tags << QStringLiteral("RP-1");
+
+    // 仅含官方目录（Squad / SquadExpansion）、无任何已知模组或其它第三方目录 → 纯净
+    if (tags.isEmpty() && !hasOther)
+        tags << QStringLiteral("Clean Stock");
+
+    return tags;
+}
+
+QString GameInstance::suggestedInstanceName(const QString &gameDir)
+{
+    QString name = QStringLiteral("KSP");
+    const GameVersion v = detectVersionFromDir(gameDir);
+    if (v.isValid())
+        name += QLatin1Char(' ') + v.toString();
+    const QStringList tags = detectInstallKindTags(gameDir);
+    for (const QString &t : tags)
+        name += QLatin1Char(' ') + t;
+    return name;
+}
+
 Registry *GameInstance::registry()
 {
     if (!m_registryLoaded)

@@ -44,6 +44,15 @@ public:
     // 供 Steam 发现等只读扫描场景使用（不产生副作用）。
     static GameVersion detectVersionFromDir(const QString &gameDir);
 
+    // 只读扫描 GameData 顶层文件夹，推导实例的安装类型标签，按固定顺序返回
+    // （RSS → Sol → RO → RP-1；若不含这些模组且仅有官方目录，则返回 { Clean Stock }）。
+    // 不区分大小写。corrupted 输出：GameData 缺失或缺少运行必需的 Squad 目录时为 true。
+    static QStringList detectInstallKindTags(const QString &gameDir, bool *corrupted = nullptr);
+
+    // 只读推导建议实例名：'KSP' + 空格 + 版本号 + 空格分隔的标签
+    // （如 "KSP 1.12.5 RSS RO"、"KSP 1.12.5 Clean Stock"；版本检测失败时省略版本号）。
+    static QString suggestedInstanceName(const QString &gameDir);
+
     // 扫描 GameData 下所有 .dll（排除 KSP 官方目录），推导手动安装模组的标识符。
     // 返回 identifier -> 相对 GameDir 路径，对应官方 ScanUnmanagedFiles/DllPathToIdentifier。
     QMap<QString, QString> scanUnmanagedDlls() const;
