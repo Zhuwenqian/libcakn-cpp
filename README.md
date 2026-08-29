@@ -1,8 +1,8 @@
-# cakn-cpp
+# libcakn-cpp
 
-A C++ re-implementation of [CKAN](https://github.com/KSP-CKAN/CKAN) — the Comma The Modding metadata **library** for *Kerbal Space Program*. Quicker and smaller than the original.
+A C++ re-implementation of [CKAN](https://github.com/KSP-CKAN/CKAN) — The Comprehensive Kerbal Archive Network **library** for *Kerbal Space Program*. Quicker and smaller than the original.
 
-> This project was **extracted from the [Hello KSP Launcher](https://github.com/) (v1.x)** as a standalone, reusable library (`libckan`). It only contains the CKAN core — no GUI, no launcher logic.
+> This project was **extracted from the [Hello KSP Launcher](https://github.com/Zhuwenqian/Hello-KSP-Launcher)** as a standalone, reusable library (`libckan`). It only contains the CKAN core — no GUI, no launcher logic.
 
 ---
 
@@ -92,7 +92,7 @@ dist/              # build output (gitignored)
 
 ### 起源
 
-本工程从 **[Hello KSP Launcher](https://github.com/)**（v1.x）中**抽离**而来，作为独立、可复用的动态库发布。仓库只包含 CKAN 核心逻辑，无任何 GUI 与启动器代码。
+本工程从 **[Hello KSP Launcher](https://github.com/Zhuwenqian/Hello-KSP-Launcher)**（v1.x）中**抽离**而来，作为独立、可复用的动态库发布。仓库只包含 CKAN 核心逻辑，无任何 GUI 与启动器代码。
 
 ### 功能特性
 
@@ -161,5 +161,5 @@ dist/              # 构建产物（git 忽略）
 ```
 
 ### 许可
-
+Copyright © Zhu Wenqian
 [GPL-3.0](LICENSE)。如计划在闭源程序里链接本库，请留意 `LICENSE` 中的 GPL 说明。
