@@ -35,6 +35,10 @@ A C++ re-implementation of [CKAN](https://github.com/KSP-CKAN/CKAN) — The Comp
 - A C++17 compiler (GCC / Clang / MSVC)
 - Qt6 development packages: **Core, Network, Concurrent, Test**
 
+### Platform Support
+
+Currently fully tested and optimized for Windows 10/11. Linux/macOS support is theoretically possible but not actively maintained due to lack of testing environments.
+
 ### Build
 
 ```sh
@@ -80,6 +84,7 @@ dist/              # build output (gitignored)
 
 ### License
 
+Copyright © Zhu Wenqian
 [GPL-3.0](LICENSE). It is a library; see the GPL note in `LICENSE` if you plan to link it from proprietary code.
 
 ---
@@ -116,6 +121,10 @@ dist/              # build output (gitignored)
 - CMake ≥ 3.16
 - 支持 C++17 的编译器（GCC / Clang / MSVC）
 - Qt6 开发包：**Core、Network、Concurrent、Test**
+
+### 平台支持
+
+当前已在 Windows 10/11 上完成充分测试与优化。Linux/macOS 理论上可运行，但因缺乏测试环境，不做主动维护。
 
 ### 编译
 
