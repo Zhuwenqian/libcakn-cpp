@@ -19,7 +19,42 @@
 #include "txfilemanager.h"
 #include "miniz.h"
 
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace ckan {
+
+namespace {
+
+#ifdef Q_OS_WIN
+// 读取 Windows PE 文件的文件版本资源（资源管理器「属性→详细信息→文件版本」）。
+// 仅 Windows 可用（Qt 无跨平台等价 API）；读取失败返回空。
+QString peFileVersion(const QString &absPath)
+{
+    const wchar_t *path = reinterpret_cast<const wchar_t *>(absPath.utf16());
+    DWORD handle = 0;
+    const DWORD size = GetFileVersionInfoSizeW(path, &handle);
+    if (size == 0) return QString();
+    QVector<uchar> buf(size);
+    if (!GetFileVersionInfoW(path, handle, size, buf.data())) return QString();
+    void *raw = nullptr;
+    UINT len = 0;
+    if (!VerQueryValueW(buf.data(), L"\\", &raw, &len)) return QString();
+    const VS_FIXEDFILEINFO *info = static_cast<const VS_FIXEDFILEINFO *>(raw);
+    if (!info || info->dwSignature != 0xfeef04bd) return QString();
+    return QStringLiteral("%1.%2.%3.%4")
+        .arg(HIWORD(info->dwFileVersionMS))
+        .arg(LOWORD(info->dwFileVersionMS))
+        .arg(HIWORD(info->dwFileVersionLS))
+        .arg(LOWORD(info->dwFileVersionLS));
+}
+#endif
+
+} // namespace
 
 CKan::CKan(const QString &gameDir, const QString &instanceName, const CKanConfig &config)
     : m_instance(gameDir, instanceName), m_config(config)
@@ -483,6 +518,56 @@ void CKan::scanUnmanagedDlls()
 bool CKan::isAutoDetected(const QString &identifier) const
 {
     return m_instance.registry()->installedDlls.contains(identifier);
+}
+
+QStringList CKan::installedGameDataEntries(const QString &identifier) const
+{
+    QStringList out;
+    const QString prefix = QStringLiteral("GameData/");
+    const Registry *reg = m_instance.registry();
+    // 注册表文件归属：收集该标识符所有文件在 GameData 下的第一段路径
+    for (auto it = reg->installedFiles.constBegin();
+         it != reg->installedFiles.constEnd(); ++it) {
+        if (it.value() != identifier) continue;
+        const QString rel = it.key();
+        if (!rel.startsWith(prefix, Qt::CaseInsensitive)) continue;
+        const QString rest = rel.mid(prefix.size());
+        const int slash = rest.indexOf(QLatin1Char('/'));
+        const QString top = slash < 0 ? prefix + rest : prefix + rest.left(slash);
+        if (!out.contains(top)) out.append(top);
+    }
+    // 手动安装（AD）DLL：其所在路径也归属该标识符
+    const QString dllRel = reg->installedDlls.value(identifier);
+    if (!dllRel.isEmpty() && dllRel.startsWith(prefix, Qt::CaseInsensitive)) {
+        const QString rest = dllRel.mid(prefix.size());
+        const int slash = rest.indexOf(QLatin1Char('/'));
+        const QString top = slash < 0 ? prefix + rest : prefix + rest.left(slash);
+        if (!out.contains(top)) out.append(top);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+QString CKan::autoDetectedVersion(const QString &identifier) const
+{
+    const QString rel = m_instance.registry()->installedDlls.value(identifier);
+    if (rel.isEmpty()) return QString();
+    // 1) 从 DLL 文件名推导（官方 DllScanner 语义：标识符为点前部分，其后即版本）
+    const QString base = QFileInfo(rel).completeBaseName();
+    if (base.size() > identifier.size() && base.startsWith(identifier)
+        && base.at(identifier.size()) == QLatin1Char('.')) {
+        const QString version = base.mid(identifier.size() + 1);
+        if (!version.isEmpty()) return version;
+    }
+    // 2) DLL 内部文件版本资源（仅 Windows）
+#ifdef Q_OS_WIN
+    const QString abs = m_instance.toAbsoluteGameDir(rel);
+    if (!abs.isEmpty()) {
+        const QString v = peFileVersion(abs);
+        if (!v.isEmpty()) return v;
+    }
+#endif
+    return QString();
 }
 
 ResolutionResult CKan::resolveInstall(const CkanModule &mod, bool autoInstallRecommends,

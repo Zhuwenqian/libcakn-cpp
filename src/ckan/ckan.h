@@ -66,6 +66,11 @@ public:
     QString installedVersion(const QString &identifier) const;
     bool isInstalled(const QString &identifier) const;
     QVector<InstalledModule> installedModules() const;
+    // 该标识符已安装模组的 GameData 顶层条目（相对游戏目录，如 "GameData/SomeMod"
+    // 或直接放根的单文件 "GameData/single.dll"）。覆盖注册表已安装模组的文件归属
+    // 与手动安装（AD，DLL 扫描）模组的 DLL 路径。供「文件」tab 在压缩包未缓存时
+    // 直接浏览已安装目录。
+    QStringList installedGameDataEntries(const QString &identifier) const;
 
     // ---- 整合包导出 ----
     // 生成官方 CKAN 元包（metapackage）JSON：depends 列出已安装模组（无版本号），
@@ -101,6 +106,12 @@ public:
     // 当前实例的 DLL 扫描是否已完成（用于页面提示"正在扫描/已就绪"）
     bool dllsScanned() const { return m_dllsScanned; }
     bool isAutoDetected(const QString &identifier) const;
+    // 手动安装（AD）模组的已装版本（尽力推导，可能为空）：
+    // 1) 按官方 DllScanner 语义从 DLL 文件名推导（标识符为点前部分，其后即版本，
+    //    如 ModuleManager.4.2.3.dll → 4.2.3）；
+    // 2) 文件名无版本部分时读取 DLL 内部文件版本资源（仅 Windows，PE 版本信息）；
+    // 3) 仍失败返回空（调用方回退为标记最新版）。
+    QString autoDetectedVersion(const QString &identifier) const;
 
     // ---- 依赖解析 ----
     // 解析安装某模块所需的完整集合（含依赖）

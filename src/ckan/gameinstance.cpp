@@ -159,6 +159,37 @@ bool buildIdToVersion(const QString &content, GameVersion *out)
     return false;
 }
 
+// 同一 DLL 被多个继任者共用的消歧（如 BDArmory.dll 被原版 BDArmory、BDAc、BDAP
+// 共用）。按实际 KSP 版本取第一个"最高支持版本 >= 当前版本"的继任者；KSP 版本
+// 未知或超过全部上限时回退到持续维护的最新继任者。否则 DLL 扫描会把 BDAP 的
+// DLL 误判成原版 BDArmory，而 BDAP 的 conflicts 声明了 BDArmory，导致重装 BDAP
+// 时误报"与 BDArmory 不兼容"。各继任者最高 KSP：BDArmory 1.1.0、
+// BDArmoryContinued 1.4.5、BDArmoryForRunwayProject 无上限（支持最新）。
+QString resolveSharedDllIdentifier(const QString &identifier, const GameVersion &ksp)
+{
+    struct Successor {
+        const char *id;
+        GameVersion maxKsp; // 空 = 无上限（支持最新 KSP）
+    };
+    // 每组首项是 DLL 文件名的原始标识符，其后为共用同一 DLL 的继任者（按上限升序）。
+    static const QVector<QVector<Successor>> groups = {
+        {
+            { "BDArmory",              GameVersion(1, 1, 0) },
+            { "BDArmoryContinued",     GameVersion(1, 4, 5) },
+            { "BDArmoryForRunwayProject", GameVersion() },
+        },
+    };
+    for (const QVector<Successor> &group : groups) {
+        if (group.isEmpty() || identifier != QLatin1String(group.first().id)) continue;
+        for (const Successor &s : group) {
+            if (!s.maxKsp.isValid() || (ksp.isValid() && ksp <= s.maxKsp))
+                return QString::fromLatin1(s.id);
+        }
+        return QString::fromLatin1(group.last().id); // 超出全部上限 → 最新继任者
+    }
+    return identifier;
+}
+
 } // namespace
 
 static QString normalized(const QString &p)
@@ -218,6 +249,9 @@ QMap<QString, QString> GameInstance::scanUnmanagedDlls() const
         QStringLiteral("GameData/SquadExpansion"),
     };
 
+    // 共享 DLL 的继任者消歧需要实际 KSP 版本（只读检测一次，无副作用）
+    const GameVersion ksp = detectVersionFromDir(m_gameDir);
+
     QDirIterator it(gameData, { QStringLiteral("*.dll"), QStringLiteral("*.DLL") },
                     QDir::Files, QDirIterator::Subdirectories);
     while (it.hasNext()) {
@@ -227,9 +261,11 @@ QMap<QString, QString> GameInstance::scanUnmanagedDlls() const
         for (const QString &sf : stockFolders)
             if (rel.startsWith(sf + QLatin1Char('/'))) { stock = true; break; }
         if (stock) continue;
-        // 标识符 = DLL 文件名第一个 '.' 之前的部分（与官方 DllPathToIdentifier 一致）
+        // 标识符 = DLL 文件名第一个 '.' 之前的部分（与官方 DllPathToIdentifier 一致）；
+        // 多个继任者共用同一 DLL 时按实际 KSP 版本消歧。
         const QString base = QFileInfo(abs).completeBaseName();
-        const QString identifier = base.section(QLatin1Char('.'), 0, 0).trimmed();
+        const QString identifier = resolveSharedDllIdentifier(
+            base.section(QLatin1Char('.'), 0, 0).trimmed(), ksp);
         if (identifier.isEmpty()) continue;
         if (!dlls.contains(identifier))
             dlls.insert(identifier, rel);

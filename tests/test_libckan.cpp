@@ -1568,6 +1568,79 @@ private slots:
         QVERIFY(!dlls.contains(QStringLiteral("egg")));
     }
 
+    // 回归：BDArmory.dll 被原版 BDArmory / BDAc / BDAP（BDArmoryForRunwayProject）
+    // 三个继任者共用，DLL 扫描必须按实际 KSP 版本消歧，否则会把 BDAP 的 DLL 误判成
+    // 原版 BDArmory（而 BDAP 的 conflicts 声明了 BDArmory），导致重装 BDAP 误报不兼容。
+    void scanDisambiguatesSharedDllByKspVersion()
+    {
+        const auto mkfile = [](const QString &root, const QString &rel, const QByteArray &content) {
+            const QString abs = root + QLatin1Char('/') + rel;
+            QDir().mkpath(QFileInfo(abs).absolutePath());
+            QFile f(abs);
+            QVERIFY2(f.open(QIODevice::WriteOnly), qPrintable(rel));
+            f.write(content);
+            f.close();
+        };
+        // 返回某标识符扫描到的 DLL 相对路径；未命中时为空串（路径必非空，可区分）
+        const auto scannedKey = [](const QString &root, const QString &key) {
+            GameInstance gi(root, QStringLiteral("test"));
+            return gi.scanUnmanagedDlls().value(key);
+        };
+        const QString relDll = QStringLiteral("GameData/BDArmory/BDArmory.dll");
+
+        // 1) 现代 KSP 1.12.5 → BDAP（持续维护）
+        {
+            QTemporaryDir dir;
+            QVERIFY(dir.isValid());
+            mkfile(dir.path(), QStringLiteral("buildID64.txt"), QByteArrayLiteral("build id = 3190\n"));
+            mkfile(dir.path(), QStringLiteral("GameData/BDArmory/BDArmory.dll"), "x");
+            QCOMPARE(scannedKey(dir.path(), QStringLiteral("BDArmoryForRunwayProject")), relDll);
+            QVERIFY(scannedKey(dir.path(), QStringLiteral("BDArmory")).isEmpty());
+            QVERIFY(scannedKey(dir.path(), QStringLiteral("BDArmoryContinued")).isEmpty());
+        }
+
+        // 2) KSP 1.3.0 → BDAc（BDArmoryContinued）
+        {
+            QTemporaryDir dir;
+            QVERIFY(dir.isValid());
+            mkfile(dir.path(), QStringLiteral("buildID64.txt"), QByteArrayLiteral("build id = 1804\n"));
+            mkfile(dir.path(), QStringLiteral("GameData/BDArmory/BDArmory.dll"), "x");
+            QCOMPARE(scannedKey(dir.path(), QStringLiteral("BDArmoryContinued")), relDll);
+            QVERIFY(scannedKey(dir.path(), QStringLiteral("BDArmory")).isEmpty());
+            QVERIFY(scannedKey(dir.path(), QStringLiteral("BDArmoryForRunwayProject")).isEmpty());
+        }
+
+        // 3) 老版本 KSP 1.1.0（build 表外，走 readme 兜底）→ 原版 BDArmory
+        {
+            QTemporaryDir dir;
+            QVERIFY(dir.isValid());
+            mkfile(dir.path(), QStringLiteral("readme.txt"), QByteArrayLiteral("Version 1.1.0\n"));
+            mkfile(dir.path(), QStringLiteral("GameData/BDArmory/BDArmory.dll"), "x");
+            QCOMPARE(scannedKey(dir.path(), QStringLiteral("BDArmory")), relDll);
+            QVERIFY(scannedKey(dir.path(), QStringLiteral("BDArmoryContinued")).isEmpty());
+            QVERIFY(scannedKey(dir.path(), QStringLiteral("BDArmoryForRunwayProject")).isEmpty());
+        }
+
+        // 4) 版本未知 → 回退持续维护的 BDAP（避免误判为原版 BDArmory 引发假冲突）
+        {
+            QTemporaryDir dir;
+            QVERIFY(dir.isValid());
+            mkfile(dir.path(), QStringLiteral("GameData/BDArmory/BDArmory.dll"), "x");
+            QCOMPARE(scannedKey(dir.path(), QStringLiteral("BDArmoryForRunwayProject")), relDll);
+            QVERIFY(scannedKey(dir.path(), QStringLiteral("BDArmory")).isEmpty());
+        }
+
+        // 5) 非共享 DLL 不受消歧影响
+        {
+            QTemporaryDir dir;
+            QVERIFY(dir.isValid());
+            mkfile(dir.path(), QStringLiteral("buildID64.txt"), QByteArrayLiteral("build id = 3190\n"));
+            mkfile(dir.path(), QStringLiteral("GameData/ModX/ModX.dll"), "x");
+            QCOMPARE(scannedKey(dir.path(), QStringLiteral("ModX")),
+                     QStringLiteral("GameData/ModX/ModX.dll"));
+        }
+    }
+
     // 回归：注册表文件被删除后（如 .ckan 整合包导入清空），loadRegistry 必须重置内存态，
     // 否则已删除的暂存数据仍滞留内存，污染后续安装与文件归属判断。
     void reloadRegistryResetsWhenFileDeleted()
@@ -3105,6 +3178,77 @@ private slots:
     }
 };
 
+class TestCkanInstalledBrowse : public QObject
+{
+    Q_OBJECT
+private slots:
+    // 已安装模组（注册表文件归属）+ AD 模组（DLL 扫描）→ GameData 顶层条目
+    void installedEntriesCoverRegistryAndAd()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        GameInstance gi(dir.path(), QStringLiteral("T"));
+        // 注册表已安装：目录模组（含多层子路径）+ 直接放 GameData 根的单文件模组
+        InstalledModule im;
+        im.identifier = QStringLiteral("DirMod");
+        im.module = makeModule(QStringLiteral("DirMod"), QStringLiteral("1.0"));
+        im.files = {QStringLiteral("GameData/DirMod/Plugins/x.dll"),
+                    QStringLiteral("GameData/DirMod/GameData/extra.cfg")};
+        gi.registry()->registerModule(im);
+        InstalledModule single;
+        single.identifier = QStringLiteral("RootDll");
+        single.module = makeModule(QStringLiteral("RootDll"), QStringLiteral("1.0"));
+        single.files = {QStringLiteral("GameData/RootDll.dll")};
+        gi.registry()->registerModule(single);
+        // AD 模组：DLL 扫描路径
+        gi.registry()->installedDlls[QStringLiteral("AdMod")] =
+            QStringLiteral("GameData/AdMod/AdMod.dll");
+        QVERIFY2(gi.saveRegistry(), "save registry failed");
+
+        CKan ckan(dir.path(), QStringLiteral("T"));
+        ckan.reloadRegistry(); // CKan 构造不自动加载注册表，需显式从磁盘读入
+        QCOMPARE(ckan.installedGameDataEntries(QStringLiteral("DirMod")),
+                 QStringList({QStringLiteral("GameData/DirMod")}));
+        QCOMPARE(ckan.installedGameDataEntries(QStringLiteral("RootDll")),
+                 QStringList({QStringLiteral("GameData/RootDll.dll")}));
+        QCOMPARE(ckan.installedGameDataEntries(QStringLiteral("AdMod")),
+                 QStringList({QStringLiteral("GameData/AdMod")}));
+        // 未安装/未知标识符 → 空
+        QVERIFY(ckan.installedGameDataEntries(QStringLiteral("Nope")).isEmpty());
+    }
+
+    // AD 模组版本：按 DLL 文件名点号后缀推导（标识符为点前部分，其后即版本）
+    void adVersionFromDllFilename()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        GameInstance gi(dir.path(), QStringLiteral("T"));
+        gi.registry()->installedDlls[QStringLiteral("ModuleManager")] =
+            QStringLiteral("GameData/ModuleManager/ModuleManager.4.2.3.dll");
+        QVERIFY2(gi.saveRegistry(), "save registry failed");
+
+        CKan ckan(dir.path(), QStringLiteral("T"));
+        ckan.reloadRegistry();
+        QCOMPARE(ckan.autoDetectedVersion(QStringLiteral("ModuleManager")),
+                 QStringLiteral("4.2.3"));
+    }
+
+    // AD 模组版本：文件名无版本部分且非有效 PE 文件 → 空（调用方回退标记最新版）
+    void adVersionFallsBackEmpty()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        GameInstance gi(dir.path(), QStringLiteral("T"));
+        gi.registry()->installedDlls[QStringLiteral("SomeTool")] =
+            QStringLiteral("GameData/SomeTool/SomeTool.dll");
+        QVERIFY2(gi.saveRegistry(), "save registry failed");
+
+        CKan ckan(dir.path(), QStringLiteral("T"));
+        ckan.reloadRegistry();
+        QVERIFY(ckan.autoDetectedVersion(QStringLiteral("SomeTool")).isEmpty());
+    }
+};
+
 static int runSuite(int argc, char *argv[], QObject &suite)
 {
     return QTest::qExec(&suite, argc, argv);
@@ -3131,6 +3275,7 @@ int main(int argc, char *argv[])
     TestCkanExport tCkanExport;
     TestModpackIO tModpackIO;
     TestCkanHistoryImport tCkanHistoryImport;
+    TestCkanInstalledBrowse tCkanInstalledBrowse;
     failures += runSuite(argc, argv, tModVer);
     failures += runSuite(argc, argv, tGameVer);
     failures += runSuite(argc, argv, tRel);
@@ -3147,6 +3292,7 @@ int main(int argc, char *argv[])
     failures += runSuite(argc, argv, tCkanExport);
     failures += runSuite(argc, argv, tModpackIO);
     failures += runSuite(argc, argv, tCkanHistoryImport);
+    failures += runSuite(argc, argv, tCkanInstalledBrowse);
     return failures;
 }
 
