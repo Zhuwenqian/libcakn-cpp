@@ -160,6 +160,11 @@ ckan.init(cfg);
 for (const auto &m : ckan.search("MechJeb")) { /* … */ }
 ```
 
+### 文档
+
+- [API 参考（中文）](docs/API.zh-CN.md)
+- [API Reference (English)](docs/API.md)
+
 ### 目录结构
 
 ```
