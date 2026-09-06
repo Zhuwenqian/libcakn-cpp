@@ -2,6 +2,7 @@
 
 #include <QJsonDocument>
 #include <QJsonArray>
+#include <QMutex>
 
 namespace ckan {
 
@@ -16,55 +17,85 @@ static QString normalizeRelPath(const QString &p)
 Registry Registry::fromJson(const QByteArray &json, QString *error)
 {
     Registry reg;
+    reg.loadFromJson(json, error);
+    return reg;
+}
+
+bool Registry::loadFromJson(const QByteArray &json, QString *error)
+{
+    // 先在局部解析，缩短持锁区间；解析失败清空为默认注册表。
+    QHash<QString, QString> fileOwners;
+    QMap<QString, InstalledModule> mods;
+    QMap<QString, Repository> repos;
+    QMap<QString, QString> dlls;
+
     QJsonParseError err;
     const QJsonDocument doc = QJsonDocument::fromJson(json, &err);
-    if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+    if (err.error == QJsonParseError::NoError && doc.isObject()) {
+        const QJsonObject root = doc.object();
+        const int rv = root.value(QStringLiteral("registry_version")).toInt(LATEST_REGISTRY_VERSION);
+        if (rv <= LATEST_REGISTRY_VERSION) {
+            const QJsonObject reposObj = root.value(QStringLiteral("sorted_repositories")).toObject();
+            for (auto it = reposObj.constBegin(); it != reposObj.constEnd(); ++it) {
+                const QJsonObject ro = it.value().toObject();
+                Repository r;
+                r.name = it.key();
+                r.uri  = ro.value(QStringLiteral("uri")).toString();
+                r.priority = ro.value(QStringLiteral("priority")).toInt();
+                r.mirror   = ro.value(QStringLiteral("x_mirror")).toBool(false);
+                r.comment  = ro.value(QStringLiteral("x_comment")).toString();
+                if (r.isValid()) repos[it.key()] = r;
+            }
+            const QJsonObject modsObj = root.value(QStringLiteral("installed_modules")).toObject();
+            for (auto it = modsObj.constBegin(); it != modsObj.constEnd(); ++it) {
+                InstalledModule im = InstalledModule::fromJsonObject(it.value().toObject());
+                if (im.isValid() && im.identifier == it.key())
+                    mods[it.key()] = im;
+            }
+            const QJsonObject filesObj = root.value(QStringLiteral("installed_files")).toObject();
+            for (auto it = filesObj.constBegin(); it != filesObj.constEnd(); ++it)
+                fileOwners[normalizeRelPath(it.key())] = it.value().toString();
+            const QJsonObject dllsObj = root.value(QStringLiteral("installed_dlls")).toObject();
+            for (auto it = dllsObj.constBegin(); it != dllsObj.constEnd(); ++it)
+                dlls[it.key()] = it.value().toString();
+
+            QMutexLocker locker(m_lock.get());
+            repositories = repos;
+            installedModules = mods;
+            installedFiles = fileOwners;
+            installedDlls = dlls;
+            registryVersion = rv;
+            return true;
+        } else if (error) {
+            *error = QStringLiteral("registry_version %1 not supported").arg(rv);
+        }
+    } else if (err.error != QJsonParseError::NoError) {
         if (error) *error = QStringLiteral("invalid registry.json: %1").arg(err.errorString());
-        return reg;
-    }
-    const QJsonObject root = doc.object();
-    reg.registryVersion = root.value(QStringLiteral("registry_version")).toInt(reg.registryVersion);
-    if (reg.registryVersion > LATEST_REGISTRY_VERSION) {
-        if (error) *error = QStringLiteral("registry_version %1 not supported").arg(reg.registryVersion);
-        return reg;
     }
 
-    // sorted_repositories
-    const QJsonObject repos = root.value(QStringLiteral("sorted_repositories")).toObject();
-    for (auto it = repos.constBegin(); it != repos.constEnd(); ++it) {
-        const QJsonObject ro = it.value().toObject();
-        Repository r;
-        r.name = it.key();
-        r.uri  = ro.value(QStringLiteral("uri")).toString();
-        r.priority = ro.value(QStringLiteral("priority")).toInt();
-        r.mirror   = ro.value(QStringLiteral("x_mirror")).toBool(false);
-        r.comment  = ro.value(QStringLiteral("x_comment")).toString();
-        if (r.isValid()) reg.repositories[it.key()] = r;
-    }
+    // 解析失败/版本不支持：清空为默认空注册表（与旧行为一致）
+    QMutexLocker locker(m_lock.get());
+    repositories.clear();
+    installedModules.clear();
+    installedFiles.clear();
+    installedDlls.clear();
+    registryVersion = LATEST_REGISTRY_VERSION;
+    return false;
+}
 
-    // installed_modules
-    const QJsonObject mods = root.value(QStringLiteral("installed_modules")).toObject();
-    for (auto it = mods.constBegin(); it != mods.constEnd(); ++it) {
-        InstalledModule im = InstalledModule::fromJsonObject(it.value().toObject());
-        if (im.isValid() && im.identifier == it.key())
-            reg.installedModules[it.key()] = im;
-    }
-
-    // installed_files
-    const QJsonObject files = root.value(QStringLiteral("installed_files")).toObject();
-    for (auto it = files.constBegin(); it != files.constEnd(); ++it)
-        reg.installedFiles[normalizeRelPath(it.key())] = it.value().toString();
-
-    // installed_dlls
-    const QJsonObject dlls = root.value(QStringLiteral("installed_dlls")).toObject();
-    for (auto it = dlls.constBegin(); it != dlls.constEnd(); ++it)
-        reg.installedDlls[it.key()] = it.value().toString();
-
-    return reg;
+void Registry::clear()
+{
+    QMutexLocker locker(m_lock.get());
+    repositories.clear();
+    installedModules.clear();
+    installedFiles.clear();
+    installedDlls.clear();
+    registryVersion = LATEST_REGISTRY_VERSION;
 }
 
 QByteArray Registry::toJson() const
 {
+    QMutexLocker locker(m_lock.get());
     QJsonObject root;
     root.insert(QStringLiteral("registry_version"), registryVersion);
 
@@ -98,39 +129,47 @@ QByteArray Registry::toJson() const
 
 void Registry::setRepositories(const QMap<QString, Repository> &repos)
 {
+    QMutexLocker locker(m_lock.get());
     repositories = repos;
 }
 
 InstalledModule *Registry::installed(const QString &identifier)
 {
-    auto it = installedModules.find(identifier);
+    QMutexLocker locker(m_lock.get());
+    const auto it = installedModules.find(identifier);
     return it == installedModules.end() ? nullptr : &it.value();
 }
 
 const InstalledModule *Registry::installed(const QString &identifier) const
 {
-    auto it = installedModules.constFind(identifier);
+    QMutexLocker locker(m_lock.get());
+    const auto it = installedModules.constFind(identifier);
     return it == installedModules.constEnd() ? nullptr : &it.value();
 }
 
 QString Registry::installedVersion(const QString &identifier) const
 {
-    const InstalledModule *im = installed(identifier);
-    return im ? im->module.version : QString();
+    QMutexLocker locker(m_lock.get());
+    const auto it = installedModules.constFind(identifier);
+    return it == installedModules.constEnd()
+        ? QString() : it.value().module.version;
 }
 
 bool Registry::isInstalled(const QString &identifier) const
 {
+    QMutexLocker locker(m_lock.get());
     return installedModules.contains(identifier);
 }
 
 QString Registry::fileOwner(const QString &relativePath) const
 {
+    QMutexLocker locker(m_lock.get());
     return installedFiles.value(normalizeRelPath(relativePath));
 }
 
 void Registry::registerModule(const InstalledModule &im)
 {
+    QMutexLocker locker(m_lock.get());
     // 先移除旧文件归属
     if (installedModules.contains(im.identifier)) {
         const InstalledModule &old = installedModules[im.identifier];
@@ -144,7 +183,8 @@ void Registry::registerModule(const InstalledModule &im)
 
 void Registry::unregisterModule(const QString &identifier)
 {
-    auto it = installedModules.find(identifier);
+    QMutexLocker locker(m_lock.get());
+    const auto it = installedModules.find(identifier);
     if (it == installedModules.end()) return;
     for (const QString &f : it->files)
         installedFiles.remove(normalizeRelPath(f));

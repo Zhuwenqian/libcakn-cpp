@@ -7,6 +7,7 @@
 #include <QJsonObject>
 #include <QElapsedTimer>
 #include <QSet>
+#include <QMutex>
 #include <QCryptographicHash>
 #include <QtConcurrent>
 #include <QThreadPool>
@@ -124,6 +125,7 @@ bool moduleDependsOn(const CkanModule &dependent, const QSet<QString> &providerN
 bool collectReverseDeps(const Registry *reg, const QString &target,
                         QSet<QString> &visited, QStringList &order)
 {
+    QMutexLocker locker(reg->mutex()); // 跨线程读 installedModules，与扫描/安装写互斥（递归）
     if (visited.contains(target)) return true;
     const InstalledModule *targetIm = reg->installed(target);
     if (!targetIm) return false;
@@ -636,14 +638,23 @@ void ModuleInstaller::cancel()
 
 InstallResult ModuleInstaller::uninstall(const QString &identifier, TxFileManager *tx)
 {
+    return uninstallMany({identifier}, tx);
+}
+
+InstallResult ModuleInstaller::uninstallMany(const QStringList &identifiers, TxFileManager *tx)
+{
     InstallResult result;
+
     Registry *reg = m_instance->registry();
-    if (!reg->isInstalled(identifier)) {
-        result.error = QStringLiteral("%1 is not installed").arg(identifier);
-        return result;
+    // 一次性校验：全部目标必须已安装；缺任何一个 → 整批直接失败，尚未发生任何改动。
+    for (const QString &id : identifiers) {
+        if (!reg->isInstalled(id)) {
+            result.error = QStringLiteral("%1 is not installed").arg(id);
+            return result;
+        }
     }
 
-    // 事务化卸载：删除的文件先备份，任一步失败整体回滚（恢复已删除文件、还原注册表）。
+    // 事务化卸载：删除的文件先备份，任一步失败/取消整体回滚（恢复已删除文件、还原注册表）。
     std::unique_ptr<TxFileManager> autoTx;
     if (!tx) {
         autoTx.reset(new TxFileManager(m_instance->ckanDir() + QStringLiteral("/transactions")));
@@ -651,30 +662,36 @@ InstallResult ModuleInstaller::uninstall(const QString &identifier, TxFileManage
     }
     const QByteArray regSnapshot = reg->toJson(); // 事务开始时的注册表快照
 
-    const auto fail = [&](const QString &err) {
+    const auto fail = [&](const QString &err, bool cancelled) {
         if (autoTx) {
             tx->rollback();
             m_instance->restoreRegistrySnapshot(regSnapshot);
         }
         InstallResult r;
         r.error = err;
+        r.cancelled = cancelled;
         return r;
     };
 
-    // 级联卸载：收集所有（直接/间接）依赖 identifier 的模组，
-    // 顺序为依赖链自外向内，先卸载依赖者，最后卸载 identifier 本身。
+    // 整批原子：跨全部目标共享一个卸载顺序（依赖链自外向内，先卸依赖者最后卸目标）。
     QSet<QString> visited;
     QStringList order;
-    if (!collectReverseDeps(reg, identifier, visited, order))
-        return fail(QStringLiteral("%1 is not installed").arg(identifier));
-    for (const QString &id : order) {
+    for (const QString &id : identifiers) {
+        if (!collectReverseDeps(reg, id, visited, order))
+            return fail(QStringLiteral("%1 is not installed").arg(id), false);
+    }
+
+    for (int i = 0; i < order.size(); ++i) {
+        const QString &id = order.at(i);
+        // 取消检查点：已删除的文件都在 tx 备份中，回滚即以“卸载前”一切还原。
+        if (m_cancelRequested.load())
+            return fail(QStringLiteral("uninstall cancelled"), true);
         const InstalledModule *im = reg->installed(id);
         if (!im) continue;
-        // 删除文件（仅删除归属此模块的文件，事务化）
         for (const QString &rel : im->files) {
             const QString abs = m_instance->toAbsoluteGameDir(rel);
             if (!tx->deleteFile(abs))
-                return fail(QStringLiteral("cannot delete %1").arg(abs));
+                return fail(QStringLiteral("cannot delete %1").arg(abs), false);
         }
         reg->unregisterModule(id);
         result.installedIdentifiers << id;
@@ -682,11 +699,23 @@ InstallResult ModuleInstaller::uninstall(const QString &identifier, TxFileManage
 
     if (autoTx) {
         if (!m_instance->saveRegistry())
-            return fail(QStringLiteral("注册表被其他进程占用，无法保存（registry.locked 已被持有）"));
+            return fail(QStringLiteral("注册表被其他进程占用，无法保存（registry.locked 已被持有）"), false);
         tx->commit();
     }
     result.ok = true;
     return result;
+}
+
+QStringList ModuleInstaller::uninstallPlan(const QStringList &identifiers)
+{
+    Registry *reg = m_instance->registry();
+    for (const QString &id : identifiers)
+        if (!reg->isInstalled(id)) return QStringList();
+    QSet<QString> visited;
+    QStringList order;
+    for (const QString &id : identifiers)
+        if (!collectReverseDeps(reg, id, visited, order)) return QStringList();
+    return order;
 }
 
 } // namespace ckan

@@ -3,6 +3,7 @@
 #include "version.h"
 
 #include <QSet>
+#include <QMutex>
 #include <algorithm>
 
 namespace ckan {
@@ -129,6 +130,8 @@ ResolutionResult RelationshipResolver::resolve(const QVector<CkanModule> &module
                                                const GameVersion &kspVersion,
                                                const GameVersionRange &extraRange)
 {
+    // 整个解析过程读取已安装 registry；与后台安装/扫描写互斥（递归锁，内部方法嵌套安全）
+    QMutexLocker regLock(registry.mutex());
     m_kspVersion = kspVersion;
     m_extraRange = extraRange;
     ResolutionResult result;

@@ -39,6 +39,9 @@ public:
     QString historyDir() const { return m_instance.historyDir(); } // 安装历史目录：实例/CKAN/history
     GameVersion detectedVersion() const;   // 当前实例实际检测到的 KSP 版本（失败返回无效版本）
     void reloadRegistry();                 // 重新从 registry.json 加载已安装数据
+    // 尝试获取当前实例注册表写锁（registry.locked）。返回 false 表示被其他进程
+    // （官方 CKAN / 另一启动器）占用；供"模组管理"页加载索引前门控等待。
+    bool tryAcquireRegistryLock() { return m_instance.engageRegistryLock(); }
 
     // ---- 仓库索引（mod 列表） ----
     // 从多个仓库下载并按优先级合并建立索引。repos 为仓库列表（priority 值越小优先级越高）。
@@ -150,7 +153,12 @@ public:
                                    const std::function<void(const QString &, int)> &onInstallProgress = {});
 
     // 卸载单个模组（单事务，失败整体回滚）。
+    // 走共享安装器，可被 cancelInstall 中止；中止时整体回滚，返回结果 cancelled=true。
     InstallResult uninstall(const QString &identifier);
+    // 整批卸载多个标识符：共享同一事务实现整批原子，成功统一提交、失败/取消整体回滚。
+    InstallResult uninstallMany(const QStringList &identifiers);
+    // 只读：一次性卸载 identifiers 的级联顺序（含目标，依赖者在前）；任一未安装返回空。
+    QStringList uninstallPlan(const QStringList &identifiers);
 
     // 请求中止当前安装/下载任务（线程安全）。
     void cancelInstall();
@@ -183,6 +191,9 @@ private:
     CKanConfig m_config;
     QMutex m_installerMutex;            // 保护 m_installer 的创建/取消/释放（跨线程）
     ModuleInstaller *m_installer = nullptr;
+    // 进度回调在后台线程（downloadModules/installFromCache 的 setter）写入、在主线程的
+    // 信号桥读取，std::function 并发读写属数据竞争；用 m_progressMutex 互斥保护。
+    mutable QMutex m_progressMutex;
     std::function<void(const QString &, qint64, qint64, qint64)> m_byteProgress;
     std::function<void(const QString &, int)> m_installProgress;
     // 保护 m_index / m_downloadCounts / m_indexReady（索引刷新在后台线程写、

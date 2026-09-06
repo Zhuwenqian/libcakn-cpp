@@ -16,10 +16,11 @@ namespace ckan {
 class GameInstance;
 class Repository;
 
-// 安装结果
+// 安装/卸载结果
 struct CKAN_API InstallResult {
     bool    ok = false;
     QString error;
+    bool    cancelled = false;   // 用户主动取消（卸载场景，已回滚到卸载前状态）
     QStringList installedIdentifiers;
 };
 
@@ -78,9 +79,19 @@ public:
     // tx 语义同 installFromCache：为空时自动事务（失败整体回滚），否则计入外部事务。
     InstallResult uninstall(const QString &identifier, TxFileManager *tx = nullptr);
 
+    // 一次卸载多个标识符（整批原子事务），实现见实现文件。
+    InstallResult uninstallMany(const QStringList &identifiers, TxFileManager *tx = nullptr);
+
+    // 只读地计算一次性卸载 identifiers 所需的级联顺序（含目标自身，依赖者在前）。
+    // 任一标识符未安装则返回空列表。用于卸载确认时提示将连带卸载的依赖数量，
+    // 与 uninstallMany 共用完全相同的级联规则，保证“告知”与“实际”一致、不产生改动。
+    QStringList uninstallPlan(const QStringList &identifiers);
+
     // 请求中止当前安装任务（线程安全）。正在下载的模组会被中止，
     // 已下载的临时数据不会写入缓存文件。
     void cancel();
+    // 清空取消标志，供新一轮操作在其入口处调用，避免上一轮取消残留影响新一轮任务。
+    void resetCancel() { m_cancelRequested.store(false); }
 
     // 供测试/外部：从 zip 提取安装文件列表
     static bool listZipEntries(const QString &zipPath, QStringList *entries, QString *error);

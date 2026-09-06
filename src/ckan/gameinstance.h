@@ -71,6 +71,9 @@ public:
     bool saveRegistry() const;
     // 当前进程是否持有注册表锁（另一进程占用时为 false）
     bool registryLockHeld() const { return m_registryLocked; }
+    // 尝试获取注册表写锁（另一进程占用返回 false）。成功后锁在实例生命周期内保持。
+    // 供"模组管理"页在加载索引前门控：锁被其他进程占用时不加载并等待。
+    bool engageRegistryLock() { acquireRegistryLock(); return m_registryLocked; }
 
     // 事务回滚：用事务开始时的注册表 JSON 快照恢复内存状态，并同步写回 registry.json。
     // 空快照表示事务开始时注册表为空（会写入空注册表）。

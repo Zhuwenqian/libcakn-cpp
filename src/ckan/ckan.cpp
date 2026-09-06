@@ -11,6 +11,7 @@
 #include <QJsonObject>
 #include <QCryptographicHash>
 #include <QCoreApplication>
+#include <QMutex>
 #include <algorithm>
 
 #include "repoindex.h"
@@ -138,16 +139,23 @@ QVector<CkanModule> CKan::search(const QString &query) const
     // 索引可能正被后台刷新线程替换：整段迭代持锁，防止读到被并发改写中的 QMap。
     QMutexLocker locker(&m_indexMutex);
     QVector<CkanModule> out;
+    out.reserve(m_index.size());
     const QString q = query.trimmed().toLower();
     for (auto it = m_index.constBegin(); it != m_index.constEnd(); ++it) {
-        // 必须按版本排序取最新，不能取 m_index 中首个（tar 字母序）版本
-        const CkanModule latest = RepoIndex::latestFor(m_index, it.key());
-        if (!latest.isValid()) continue;
+        // 必须按版本取最新，不能取 m_index 中首个（tar 字母序）版本。
+        // 线性扫描求当前标识符的最新版本：跳过 latestFor->versionsFor 的整份版本表
+        // 深拷贝 + 排序（大索引下每标识符一次全表重排是性能热点），仅取一个模块引用。
+        const QVector<CkanModule> &vers = it.value();
+        if (vers.isEmpty()) continue;
+        const CkanModule *latest = &vers.first();
+        for (int i = 1; i < vers.size(); ++i)
+            if (ModuleVersion(vers[i].version) > ModuleVersion(latest->version))
+                latest = &vers.at(i);
         if (q.isEmpty()
-            || latest.identifier.toLower().contains(q)
-            || latest.name.toLower().contains(q)
-            || latest.abstract.toLower().contains(q)) {
-            out.append(latest);
+            || latest->identifier.toLower().contains(q)
+            || latest->name.toLower().contains(q)
+            || latest->abstract.toLower().contains(q)) {
+            out.append(*latest);
         }
     }
     // 按名称排序
@@ -189,6 +197,7 @@ QVector<InstalledModule> CKan::installedModules() const
 {
     QVector<InstalledModule> out;
     const Registry *reg = m_instance.registry();
+    QMutexLocker locker(reg->mutex()); // 与后台扫描/安装写互斥
     for (auto it = reg->installedModules.constBegin();
          it != reg->installedModules.constEnd(); ++it)
         out.append(it.value());
@@ -509,15 +518,22 @@ QString CKan::importStoreCache(const CkanModule &mod, const QString &sourcePath,
 
 void CKan::scanUnmanagedDlls()
 {
+    const QMap<QString, QString> dlls = m_instance.scanUnmanagedDlls(); // 无锁：仅文件系统扫描
     Registry *reg = m_instance.registry();
-    reg->installedDlls = m_instance.scanUnmanagedDlls();
+    {
+        // 与读取方/其他写方互斥，避免并发改写 installedDlls
+        QMutexLocker locker(reg->mutex());
+        reg->installedDlls = dlls;
+    }
     m_instance.saveRegistry();
     m_dllsScanned = true;
 }
 
 bool CKan::isAutoDetected(const QString &identifier) const
 {
-    return m_instance.registry()->installedDlls.contains(identifier);
+    const Registry *reg = m_instance.registry();
+    QMutexLocker locker(reg->mutex());
+    return reg->installedDlls.contains(identifier);
 }
 
 QStringList CKan::installedGameDataEntries(const QString &identifier) const
@@ -525,6 +541,7 @@ QStringList CKan::installedGameDataEntries(const QString &identifier) const
     QStringList out;
     const QString prefix = QStringLiteral("GameData/");
     const Registry *reg = m_instance.registry();
+    QMutexLocker locker(reg->mutex()); // 跨线程读 installedFiles/installedDlls
     // 注册表文件归属：收集该标识符所有文件在 GameData 下的第一段路径
     for (auto it = reg->installedFiles.constBegin();
          it != reg->installedFiles.constEnd(); ++it) {
@@ -550,7 +567,12 @@ QStringList CKan::installedGameDataEntries(const QString &identifier) const
 
 QString CKan::autoDetectedVersion(const QString &identifier) const
 {
-    const QString rel = m_instance.registry()->installedDlls.value(identifier);
+    const Registry *reg = m_instance.registry();
+    QString rel;
+    {
+        QMutexLocker locker(reg->mutex());
+        rel = reg->installedDlls.value(identifier);
+    }
     if (rel.isEmpty()) return QString();
     // 1) 从 DLL 文件名推导（官方 DllScanner 语义：标识符为点前部分，其后即版本）
     const QString base = QFileInfo(rel).completeBaseName();
@@ -609,14 +631,22 @@ ModuleInstaller *CKan::ensureInstaller()
         m_installer->moveToThread(QCoreApplication::instance()->thread());
         m_installer->setProxyUrl(m_config.proxyUrl);
         m_installer->setDownloadRateLimitBps(m_config.downloadRateLimitBps);
-        // 把安装器的字节进度信号桥接到 m_byteProgress 回调（下载在后台线程执行）
+        // 把安装器的字节进度信号桥接到 m_byteProgress 回调（下载在后台线程执行）。
+        // m_byteProgress 在主/调用线程写入、信号桥在安装器归属线程（主线程）读取，
+        // std::function 并发读写属数据竞争；先加锁拷贝快照再解锁调用，避免回调期间持锁。
         QObject::connect(m_installer, &ModuleInstaller::byteProgress, m_installer,
                          [this](const QString &id, qint64 done, qint64 total, qint64 speed) {
-            if (m_byteProgress) m_byteProgress(id, done, total, speed);
+            QMutexLocker progressLocker(&m_progressMutex);
+            const auto byteProgress = m_byteProgress;
+            progressLocker.unlock();
+            if (byteProgress) byteProgress(id, done, total, speed);
         });
         QObject::connect(m_installer, &ModuleInstaller::installProgress, m_installer,
                          [this](const QString &id, int percent) {
-            if (m_installProgress) m_installProgress(id, percent);
+            QMutexLocker progressLocker(&m_progressMutex);
+            const auto installProgress = m_installProgress;
+            progressLocker.unlock();
+            if (installProgress) installProgress(id, percent);
         });
     }
     return m_installer;
@@ -632,11 +662,11 @@ bool CKan::downloadModules(const QVector<CkanModule> &modules,
                            std::atomic_bool *cancelFlag)
 {
     ModuleInstaller *inst = ensureInstaller();
-    m_byteProgress = onByteProgress;
+    { QMutexLocker progressLocker(&m_progressMutex); m_byteProgress = onByteProgress; }
     const bool ok = inst->downloadModules(modules, downloadDir,
                                           m_config.moduleMirrorPrefixes,
                                           preferModuleMirrors, error, concurrency, cancelFlag);
-    m_byteProgress = std::function<void(const QString &, qint64, qint64, qint64)>();
+    { QMutexLocker progressLocker(&m_progressMutex); m_byteProgress = {}; }
     if (ok && conflicts)
         *conflicts = computeFolderConflicts(modules, downloadDir);
     return ok;
@@ -678,7 +708,7 @@ InstallResult CKan::installFromCache(const QVector<CkanModule> &modules,
 {
     ModuleInstaller *inst = ensureInstaller();
     GameInstance *g = &m_instance;
-    m_installProgress = onInstallProgress;
+    { QMutexLocker progressLocker(&m_progressMutex); m_installProgress = onInstallProgress; }
 
     // 单事务：先卸载旧版再安装新版，作为一个原子操作。
     // 任一步失败（含用户取消）整体回滚——恢复被删除的旧版文件、删除已写入的新文件、还原注册表。
@@ -689,7 +719,7 @@ InstallResult CKan::installFromCache(const QVector<CkanModule> &modules,
         if (!ru.ok) {
             tx.rollback();
             g->restoreRegistrySnapshot(regSnapshot);
-            m_installProgress = std::function<void(const QString &, int)>();
+            { QMutexLocker progressLocker(&m_progressMutex); m_installProgress = {}; }
             return ru;
         }
     }
@@ -697,21 +727,35 @@ InstallResult CKan::installFromCache(const QVector<CkanModule> &modules,
     if (!r.ok) {
         tx.rollback();
         g->restoreRegistrySnapshot(regSnapshot);
-        m_installProgress = std::function<void(const QString &, int)>();
+        { QMutexLocker progressLocker(&m_progressMutex); m_installProgress = {}; }
         return r;
     }
     g->saveRegistry();
     tx.commit();
-    m_installProgress = std::function<void(const QString &, int)>();
+    { QMutexLocker progressLocker(&m_progressMutex); m_installProgress = {}; }
     return r;
 }
 
 InstallResult CKan::uninstall(const QString &identifier)
 {
-    ModuleInstaller installer(&m_instance);
-    installer.setProxyUrl(m_config.proxyUrl);
-    installer.setDownloadRateLimitBps(m_config.downloadRateLimitBps);
-    return installer.uninstall(identifier);
+    return uninstallMany({identifier});
+}
+
+// 卸载走共享安装器（ensureInstaller），这样 cancelInstall()/cancelCurrentOperation()
+// 能真正触达到进行中的卸载任务；整批共享同一事务实现原子回滚。
+InstallResult CKan::uninstallMany(const QStringList &identifiers)
+{
+    ModuleInstaller *inst = ensureInstaller();
+    inst->resetCancel(); // 新一轮卸载从前一次残留的取消标志中复位
+    return inst->uninstallMany(identifiers);
+}
+
+// 只读：一次性卸载 identifiers 的级联顺序（含目标，依赖者在前）；任一未安装返回空。
+// 用临时实例计算，不产生任何改动，仅供 UI 在卸载确认时提示连带数量。
+QStringList CKan::uninstallPlan(const QStringList &identifiers)
+{
+    ModuleInstaller tmp(&m_instance);
+    return tmp.uninstallPlan(identifiers);
 }
 
 void CKan::cancelInstall()
