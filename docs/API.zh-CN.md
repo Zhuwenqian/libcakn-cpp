@@ -169,7 +169,7 @@ public:
 | 签名 | 说明 |
 |---|---|
 | `ResolutionResult resolveInstall(const CkanModule &mod, bool autoInstallRecommends = true, bool withSuggests = false)` | 解析安装该模组所需的完整集合（含依赖）。 |
-| `ResolutionResult resolveInstallMany(const QVector<CkanModule> &mods, bool autoInstallRecommends = true, bool withSuggests = false, const GameVersionRange &extraRange = GameVersionRange())` | 一次性解析多个模组的完整安装集（含相互依赖）。`extraRange`：用户勾选的额外兼容区间（无效表示未启用）；候选兼容当前实例版本或兼容该区间即算兼容。 |
+| `ResolutionResult resolveInstallMany(const QVector<CkanModule> &mods, bool autoInstallRecommends = true, bool withSuggests = false, const GameVersionRange &extraRange = GameVersionRange(), bool collectRecommends = false)` | 一次性解析多个模组的完整安装集（含相互依赖）。`extraRange`：用户勾选的额外兼容区间（无效表示未启用）；候选兼容当前实例版本或兼容该区间即算兼容。`collectRecommends`：把本批的推荐模组（Recommends）收集到 `result.recommendedModules` 而非自动安装（对齐官方安装对话框的推荐勾选；收集模式下 `autoInstallRecommends` 失效）。 |
 
 ### 安装流程（分两阶段，供后台线程调用）
 
@@ -603,6 +603,8 @@ struct CKAN_API ProviderChoice {
 
 struct CKAN_API ResolutionResult {
     QVector<CkanModule> modulesToInstall;    // 按依赖顺序（依赖在前）
+    QVector<CkanModule> recommendedModules;  // 收集的推荐安装模组（Recommends；仅 collectRecommends=true 时收集，
+                                             // 不随 modulesToInstall 自动安装，由 UI 层弹窗勾选）
     QVector<CkanModule> suggestedModules;    // 级联建议的可选模组（仅收集，不自动安装）
     QVector<ProviderChoice> providerChoices; // 需用户选择的多提供者（非空时 UI 应先弹窗处理）
     QStringList notFound;                    // 无法满足的依赖
@@ -624,7 +626,8 @@ public:
                              bool autoInstallRecommends = true,
                              bool withSuggests = false,
                              const GameVersion &kspVersion = GameVersion(),
-                             const GameVersionRange &extraRange = GameVersionRange());
+                             const GameVersionRange &extraRange = GameVersionRange(),
+                             bool collectRecommends = false);
 };
 ```
 
@@ -635,6 +638,8 @@ public:
 - 已安装模组满足版本约束才算已满足；否则选新版升级。
 - 冲突做**双向**检测（新模块声明的 + 已选模块声明的，含版本约束）。
 - 推荐/建议模组与已选集合冲突时静默跳过；硬依赖冲突计入 `conflicts`。
+- `collectRecommends=true` 时把推荐模组（Recommends）收集到 `recommendedModules` 而非自动安装，
+  且做级联收集（推荐模组自身的推荐也继续收集）；该模式下 `autoInstallRecommends` 失效。候选去重、按版本降序。
 - `providerChoices` 非空时，UI 应让用户选择后重新解析。
 
 ---
@@ -880,6 +885,22 @@ public:
 均为 `ckan` 命名空间下的自由函数。
 
 ```cpp
+// 整合包元数据条目（zip 根目录下的固定文件名，与 GameData 同层）。导出时写入：
+// launcherVersion=启动器版本(导入仅显示不校验)、gameVersion=游戏版本(精确到 patch，如 "1.12.5")、
+// name=整合包名、description=描述(可空)。
+inline constexpr const char *kModpackMetaFileName = "hkspl_package.json";
+
+// 读取 zip 根目录下整合包元数据文件 hkspl_package.json 的原始 JSON 字节。
+// 返回状态：Ok=成功且 json 写回；NotFound=zip 中无该条目；ReadError=存在但打开/解压失败。
+enum class ModpackMetaStatus { NotFound, ReadError, Ok };
+CKAN_API ModpackMetaStatus modpackReadPackageMeta(const QString &zipPath,
+                                                  QByteArray *json, QString *error);
+
+// 整合包游戏版本与当前实例版本的 minor 级兼容判定：major 与 minor 都相同即视为兼容（patch 差异
+// 不影响，如 1.12.4 vs 1.12.5 兼容）。任一侧版本无效时返回 false（无法比较）。
+CKAN_API bool modpackVersionCompatible(const GameVersion &pkgVersion,
+                                       const GameVersion &currentVersion);
+
 CKAN_API bool modpackZipGameDataPrefix(const QString &zipPath, QString *prefix, QString *error);
     // 在 zip 中探测顶层 GameData 目录，返回解压前缀（如 "GameData/" 或 "包名/GameData/"）。
     // 找不到任何 GameData 目录时返回 false 并填充 error。

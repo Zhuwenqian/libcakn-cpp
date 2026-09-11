@@ -170,7 +170,7 @@ public:
 | Signature | Description |
 |---|---|
 | `ResolutionResult resolveInstall(const CkanModule &mod, bool autoInstallRecommends = true, bool withSuggests = false)` | Resolve the full set (dependencies included) needed to install `mod`. |
-| `ResolutionResult resolveInstallMany(const QVector<CkanModule> &mods, bool autoInstallRecommends = true, bool withSuggests = false, const GameVersionRange &extraRange = GameVersionRange())` | Resolve a batch of modules as one install set (mutual dependencies handled). `extraRange`: user-selected extra compatibility range (invalid = disabled); a candidate is compatible if it matches the current instance version **or** that range. |
+| `ResolutionResult resolveInstallMany(const QVector<CkanModule> &mods, bool autoInstallRecommends = true, bool withSuggests = false, const GameVersionRange &extraRange = GameVersionRange(), bool collectRecommends = false)` | Resolve a batch of modules as one install set (mutual dependencies handled). `extraRange`: user-selected extra compatibility range (invalid = disabled); a candidate is compatible if it matches the current instance version **or** that range. `collectRecommends`: collect the Recommends of the batch into `result.recommendedModules` instead of auto-installing them (aligned with the official install dialog's recommended checkboxes; `autoInstallRecommends` is ignored in collection mode). |
 
 ### Install flow (two phases — call from a worker thread)
 
@@ -609,6 +609,8 @@ struct CKAN_API ProviderChoice {
 
 struct CKAN_API ResolutionResult {
     QVector<CkanModule> modulesToInstall;    // dependency order (dependencies first)
+    QVector<CkanModule> recommendedModules;  // collected Recommends (only when collectRecommends=true;
+                                             // NOT auto-installed with modulesToInstall — UI picks)
     QVector<CkanModule> suggestedModules;    // cascade suggests (collected, NOT auto-installed)
     QVector<ProviderChoice> providerChoices; // virtual packages needing user choice
     QStringList notFound;                    // unsatisfiable dependencies
@@ -630,7 +632,8 @@ public:
                              bool autoInstallRecommends = true,
                              bool withSuggests = false,
                              const GameVersion &kspVersion = GameVersion(),
-                             const GameVersionRange &extraRange = GameVersionRange());
+                             const GameVersionRange &extraRange = GameVersionRange(),
+                             bool collectRecommends = false);
 };
 ```
 
@@ -644,6 +647,9 @@ Resolution rules:
 - Conflicts are checked **both ways** (newly-declared + already-selected), including version constraints.
 - Recommended/suggested mods conflicting with the selected set are silently skipped; hard-dependency
   conflicts are recorded in `conflicts`.
+- `collectRecommends=true` collects the Recommends (with cascade — a recommended mod's own Recommends
+  are followed too) into `recommendedModules` instead of auto-installing; `autoInstallRecommends` is
+  ignored in this mode. Candidates are de-duplicated and version-descending.
 - A non-empty `providerChoices` means the UI should let the user pick, then re-resolve.
 
 ---
@@ -895,6 +901,24 @@ is performed.
 unit-testable). All functions are free functions in the `ckan` namespace.
 
 ```cpp
+// Fixed metadata file name at the zip root (same level as GameData). Written on export:
+// launcherVersion (shown on import, not validated), gameVersion (exact patch, e.g. "1.12.5"),
+// name (pack name), description (may be empty).
+inline constexpr const char *kModpackMetaFileName = "hkspl_package.json";
+
+// Read the raw JSON bytes of hkspl_package.json at the zip root.
+// Status: Ok=success and json filled; NotFound=no such entry in the zip; ReadError=entry present
+// but open/extract failed.
+enum class ModpackMetaStatus { NotFound, ReadError, Ok };
+CKAN_API ModpackMetaStatus modpackReadPackageMeta(const QString &zipPath,
+                                                  QByteArray *json, QString *error);
+
+// minor-level compatibility between the pack's game version and the current instance: compatible
+// iff major and minor both match (patch differences don't matter, e.g. 1.12.4 vs 1.12.5). Returns
+// false if either version is invalid (unable to compare).
+CKAN_API bool modpackVersionCompatible(const GameVersion &pkgVersion,
+                                       const GameVersion &currentVersion);
+
 CKAN_API bool modpackZipGameDataPrefix(const QString &zipPath, QString *prefix, QString *error);
     // Probe the top-level GameData directory inside the zip, return the extraction prefix
     // (e.g. "GameData/" or "packname/GameData/"). false + error if none found.
