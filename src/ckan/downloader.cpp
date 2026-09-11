@@ -5,6 +5,7 @@
 #include <QEventLoop>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <QDebug>
 
 namespace ckan {
 
@@ -52,6 +53,8 @@ bool Downloader::download(const QString &url, const QStringList &mirrors,
     bool ok = false;
     QString lastError;
 
+    qInfo() << "[download] 开始下载，备用地址" << (m_mirrors.size() - 1)
+            << "个，优先顺序首位=" << m_mirrors.value(0);
     while (m_attempt < m_mirrors.size()) {
         m_currentUrl = m_mirrors.at(m_attempt++);
         QNetworkRequest req{QUrl(m_currentUrl)};
@@ -80,7 +83,12 @@ bool Downloader::download(const QString &url, const QStringList &mirrors,
             lastError = QStringLiteral("内容校验失败（%1 字节，非预期格式，可能返回了错误页面或被截断）")
                             .arg(data.size());
         }
+        qInfo() << "[download] 地址失败，尝试下一个：" << m_currentUrl
+                << "原因：" << lastError;
     }
+    qInfo() << "[download] " << (ok ? "下载成功" : QStringLiteral("下载失败"))
+            << QStringLiteral("数据%1字节").arg(out ? out->size() : 0)
+            << (lastError.isEmpty() ? QString() : QStringLiteral("，%1").arg(lastError));
     if (!ok && error && !lastError.isEmpty())
         *error = lastError;
     return ok;

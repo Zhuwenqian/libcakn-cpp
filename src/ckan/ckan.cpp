@@ -603,7 +603,8 @@ ResolutionResult CKan::resolveInstall(const CkanModule &mod, bool autoInstallRec
 ResolutionResult CKan::resolveInstallMany(const QVector<CkanModule> &mods,
                                           bool autoInstallRecommends,
                                           bool withSuggests,
-                                          const GameVersionRange &extraRange)
+                                          const GameVersionRange &extraRange,
+                                          bool collectRecommends)
 {
     // RelationshipResolver 内部持有索引的 const 引用；索引可能在后台线程被刷新替换
     // （交换后旧 QMap 被销毁），故锁内拷贝一份传给解析器，杜绝悬垂引用。
@@ -614,9 +615,10 @@ ResolutionResult CKan::resolveInstallMany(const QVector<CkanModule> &mods,
     }
     RelationshipResolver resolver(indexCopy);
     // 传入当前实例检测到的 KSP 版本，候选按兼容性过滤（无效版本视为不过滤）；
-    // extraRange 为用户勾选的额外兼容区间（无效表示未启用）。
+    // extraRange 为用户勾选的额外兼容区间（无效表示未启用）；
+    // collectRecommends=true 时 recommends 仅收集不自动安装（供 UI 弹窗勾选）。
     return resolver.resolve(mods, *m_instance.registry(), autoInstallRecommends, withSuggests,
-                            m_instance.detectVersion(), extraRange);
+                            m_instance.detectVersion(), extraRange, collectRecommends);
 }
 
 ModuleInstaller *CKan::ensureInstaller()

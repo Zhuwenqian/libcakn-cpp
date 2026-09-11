@@ -1,6 +1,7 @@
 #include "moduleinstaller.h"
 
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QDateTime>
@@ -636,6 +637,18 @@ void ModuleInstaller::cancel()
     m_cancelRequested.store(true);
 }
 
+namespace {
+
+// 递归判断目录下（含子目录）是否还存在任何文件。
+// 仅目录为"空结构"（无任何文件）时返回 false，用于确认可安全删除遗留的顶层文件夹。
+bool dirHasFilesRecursive(const QString &absDir)
+{
+    QDirIterator it(absDir, QDir::Files, QDirIterator::Subdirectories);
+    return it.hasNext();
+}
+
+} // namespace
+
 InstallResult ModuleInstaller::uninstall(const QString &identifier, TxFileManager *tx)
 {
     return uninstallMany({identifier}, tx);
@@ -681,6 +694,8 @@ InstallResult ModuleInstaller::uninstallMany(const QStringList &identifiers, TxF
             return fail(QStringLiteral("%1 is not installed").arg(id), false);
     }
 
+    // 收集本批所有被卸载模组写过的 GameData 顶层文件夹，供事后清理空的遗留文件夹。
+    QSet<QString> topFolders;
     for (int i = 0; i < order.size(); ++i) {
         const QString &id = order.at(i);
         // 取消检查点：已删除的文件都在 tx 备份中，回滚即以“卸载前”一切还原。
@@ -689,12 +704,40 @@ InstallResult ModuleInstaller::uninstallMany(const QStringList &identifiers, TxF
         const InstalledModule *im = reg->installed(id);
         if (!im) continue;
         for (const QString &rel : im->files) {
+            QString s = rel;
+            s.replace(QLatin1Char('\\'), QLatin1Char('/'));
+            if (s.startsWith(QStringLiteral("GameData/"))) {
+                const QString top = s.mid(9).section(QLatin1Char('/'), 0, 0);
+                if (!top.isEmpty()) topFolders.insert(top);
+            }
             const QString abs = m_instance->toAbsoluteGameDir(rel);
             if (!tx->deleteFile(abs))
                 return fail(QStringLiteral("cannot delete %1").arg(abs), false);
         }
         reg->unregisterModule(id);
         result.installedIdentifiers << id;
+    }
+
+    // 清理卸载后遗留的空的顶层 GameData 文件夹。
+    // 仅当：不再被其他已注册模组占用，且磁盘上已无任何文件（只残留空子目录）时才删除，
+    // 以事务方式归档以便整批回滚。共享文件夹、含手动/未登记内容的文件夹均被保留。
+    for (const QString &top : topFolders) {
+        const QString abs = m_instance->toAbsoluteGameDir(QStringLiteral("GameData/") + top);
+        if (abs.isEmpty()) continue;
+        // 仅处理磁盘上的真实目录（如 GameData/xxx.dll 这种直接文件已在上面删除，非遗留文件夹）
+        if (!QFileInfo(abs).isDir()) continue;
+        bool shared = false;
+        {
+            QRecursiveMutex *lock = reg->mutex();
+            QMutexLocker locker(lock);
+            const QString prefix = QStringLiteral("GameData/") + top + QLatin1Char('/');
+            for (auto k = reg->installedFiles.constBegin(); k != reg->installedFiles.constEnd(); ++k)
+                if (k.key().startsWith(prefix)) { shared = true; break; }
+        }
+        if (shared) continue;
+        if (dirHasFilesRecursive(abs)) continue;
+        if (!tx->deleteDir(abs))
+            return fail(QStringLiteral("cannot delete folder %1").arg(abs), false);
     }
 
     if (autoTx) {

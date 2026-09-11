@@ -27,6 +27,8 @@ struct CKAN_API ProviderChoice {
 // 依赖解析结果
 struct CKAN_API ResolutionResult {
     QVector<CkanModule> modulesToInstall;   // 按依赖顺序（依赖在前）
+    QVector<CkanModule> recommendedModules; // 收集的推荐安装模组（Recommends；仅 collectRecommends=true 时收集，
+                                            // 不随 modulesToInstall 自动安装，由 UI 层弹窗勾选）
     QVector<CkanModule> suggestedModules;   // 级联建议安装的可选模组（不随 modulesToInstall 自动安装）
     QVector<ProviderChoice> providerChoices; // 需用户选择的多提供者（非空时 UI 应先弹窗处理）
     QStringList         notFound;           // 无法满足的依赖
@@ -44,11 +46,13 @@ public:
     RelationshipResolver(const QMap<QString, QVector<CkanModule>> &index);
 
     // 解析安装 modulesToInstall 所需的完整集合（含依赖）。
-    // autoInstallRecommends: 是否自动安装 recommends。
+    // autoInstallRecommends: 是否自动安装 recommends（collectRecommends=true 时该参数失效，仅收集）。
     // withSuggests: 是否收集级联建议模组到 suggestedModules（仅收集，不自动安装）。
     // kspVersion: 当前游戏版本；解析候选时按 KSP 兼容性过滤（无效版本视为不过滤）。
     // extraRange: 用户勾选的额外兼容区间；候选若兼容当前版本或兼容该区间任一即算兼容
     //   （无效区间视为不启用）。空勾选时调用方传无效区间，仅按 kspVersion 判断。
+    // collectRecommends: 是否收集推荐模组（Recommends）到 recommendedModules 而非自动安装，
+    //   供 UI 层弹窗让用户勾选（对齐官方安装对话框的推荐选择）。
     //   - 依赖候选只取满足版本约束且 KSP 兼容的最高版本；
     //   - 已安装模组必须满足依赖的版本约束才算已满足（不满足则选新版升级）；
     //   - 冲突做双向检测（新模块声明的 + 已选模块声明的，含版本约束）；
@@ -58,7 +62,8 @@ public:
                              bool autoInstallRecommends = true,
                              bool withSuggests = false,
                              const GameVersion &kspVersion = GameVersion(),
-                             const GameVersionRange &extraRange = GameVersionRange());
+                             const GameVersionRange &extraRange = GameVersionRange(),
+                             bool collectRecommends = false);
 
 private:
     const QMap<QString, QVector<CkanModule>> &m_index;

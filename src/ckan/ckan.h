@@ -122,10 +122,13 @@ public:
                                     bool withSuggests = false);
     // 一次性解析多个模块的完整安装集（含相互依赖，用于批量安装）。
     // extraRange: 用户勾选的额外兼容区间（无效表示未启用）；候选兼容当前实例版本或兼容该区间即算兼容。
+    // collectRecommends: 收集推荐模组（Recommends）到 recommendedModules 而非自动安装（对齐官方
+    //   安装对话框的推荐勾选；配合 UI 弹窗使用，autoInstallRecommends 在收集模式下失效）。
     ResolutionResult resolveInstallMany(const QVector<CkanModule> &mods,
                                         bool autoInstallRecommends = true,
                                         bool withSuggests = false,
-                                        const GameVersionRange &extraRange = GameVersionRange());
+                                        const GameVersionRange &extraRange = GameVersionRange(),
+                                        bool collectRecommends = false);
 
     // ---- 安装流程（分两阶段，供启动器后台线程调用） ----
     // 阶段一：下载全部模块 zip 到 downloadDir，并按 zip 实际内容计算与手动占用文件夹的冲突。

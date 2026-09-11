@@ -141,6 +141,41 @@ bool modpackZipGameDataPrefix(const QString &zipPath, QString *prefix, QString *
     return ok;
 }
 
+ModpackMetaStatus modpackReadPackageMeta(const QString &zipPath, QByteArray *json, QString *error)
+{
+    OpenedZip zip;
+    if (!zip.open(zipPath, error))
+        return ModpackMetaStatus::ReadError;
+
+    const mz_uint idx = mz_zip_reader_locate_file(&zip.zip, kModpackMetaFileName, nullptr, 0);
+    if (idx == static_cast<mz_uint>(-1)) { // 元数据条目缺失（旧版/手制整合包）
+        zip.close();
+        return ModpackMetaStatus::NotFound;
+    }
+    size_t size = 0;
+    void *mem = mz_zip_reader_extract_to_heap(&zip.zip, idx, &size, 0);
+    if (!mem) {
+        zip.close();
+        if (error) *error = QStringLiteral("解压整合包元数据失败：%1").arg(zipPath);
+        return ModpackMetaStatus::ReadError;
+    }
+    // 复制为独立字节串后再释放 miniz 缓冲（extract_to_heap 的内存需 mz_free）。
+    if (json) {
+        *json = QByteArray(static_cast<const char *>(mem), static_cast<qint64>(size));
+    }
+    mz_free(mem);
+    zip.close();
+    return ModpackMetaStatus::Ok;
+}
+
+bool modpackVersionCompatible(const GameVersion &pkgVersion, const GameVersion &currentVersion)
+{
+    if (!pkgVersion.isValid() || !currentVersion.isValid())
+        return false;
+    return pkgVersion.major() == currentVersion.major()
+        && pkgVersion.minor() == currentVersion.minor();
+}
+
 QStringList modpackCkanDepends(const QByteArray &json, QString *error)
 {
     QStringList out;
