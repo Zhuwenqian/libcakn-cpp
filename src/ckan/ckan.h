@@ -129,6 +129,12 @@ public:
                                         bool withSuggests = false,
                                         const GameVersionRange &extraRange = GameVersionRange(),
                                         bool collectRecommends = false);
+    // 收集单个父模组的推荐(Recommends)/建议(Suggests)候选（仅候选，不安装、不级联）。
+    // curInstallSet 为当前待安装集合（含依赖）。供多阶段渐进式弹窗：逐模组收集 → 弹窗勾选 → 级联。
+    QVector<CkanModule> collectOptionalFor(const CkanModule &parent,
+                                           const QVector<CkanModule> &curInstallSet,
+                                           bool wantRecommends,
+                                           const GameVersionRange &extraRange = GameVersionRange());
 
     // ---- 安装流程（分两阶段，供启动器后台线程调用） ----
     // 阶段一：下载全部模块 zip 到 downloadDir，并按 zip 实际内容计算与手动占用文件夹的冲突。

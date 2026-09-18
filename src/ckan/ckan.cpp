@@ -621,6 +621,20 @@ ResolutionResult CKan::resolveInstallMany(const QVector<CkanModule> &mods,
                             m_instance.detectVersion(), extraRange, collectRecommends);
 }
 
+QVector<CkanModule> CKan::collectOptionalFor(const CkanModule &parent,
+                                             const QVector<CkanModule> &curInstallSet,
+                                             bool wantRecommends, const GameVersionRange &extraRange)
+{
+    QMap<QString, QVector<CkanModule>> indexCopy;
+    {
+        QMutexLocker locker(&m_indexMutex);
+        indexCopy = m_index;
+    }
+    RelationshipResolver resolver(indexCopy);
+    return resolver.collectOptionalFor(parent, curInstallSet, *m_instance.registry(),
+                                       wantRecommends, m_instance.detectVersion(), extraRange);
+}
+
 ModuleInstaller *CKan::ensureInstaller()
 {
     QMutexLocker locker(&m_installerMutex);

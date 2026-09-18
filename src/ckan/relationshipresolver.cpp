@@ -38,6 +38,61 @@ QVector<CkanModule> pickCandidates(const QVector<CkanModule> &candidates,
     return out;
 }
 
+// 构建虚拟包索引：虚拟包名 -> 提供该虚拟包的全部候选模块（按提供者标识符去重）。
+QMap<QString, QVector<CkanModule>> buildVirtualIndex(
+    const QMap<QString, QVector<CkanModule>> &index)
+{
+    QMap<QString, QVector<CkanModule>> vindex;
+    for (auto it = index.constBegin(); it != index.constEnd(); ++it) {
+        for (const CkanModule &cand : it.value()) {
+            const QStringList prov = cand.providesList();
+            for (const QString &p : prov) {
+                QVector<CkanModule> &v = vindex[p];
+                bool exists = false;
+                for (const CkanModule &existing : v)
+                    if (existing.identifier == cand.identifier) { exists = true; break; }
+                if (!exists) v.append(cand);
+            }
+        }
+    }
+    return vindex;
+}
+
+// 收集某关系的全部可用候选：过滤版本约束 + KSP 兼容、按提供者标识符去重、按版本降序。
+// any_of 关系收集所有子关系的候选（去重）；单关系收集满足约束的全部提供者。
+QVector<CkanModule> relationshipCandidates(const Relationship &rel,
+                                           const QMap<QString, QVector<CkanModule>> &index,
+                                           const QMap<QString, QVector<CkanModule>> &vindex,
+                                           const GameVersion &ksp,
+                                           const GameVersionRange &extraRange)
+{
+    QVector<CkanModule> out;
+    QSet<QString> seen;
+    auto collectOne = [&](const Relationship &sub) {
+        QVector<CkanModule> candidates;
+        const auto found = index.constFind(sub.name);
+        if (found != index.constEnd())
+            candidates = found.value();
+        else {
+            const auto vf = vindex.constFind(sub.name);
+            if (vf != vindex.constEnd())
+                candidates = vf.value();
+        }
+        const QVector<CkanModule> valid = pickCandidates(candidates, sub, ksp, extraRange);
+        for (const CkanModule &c : valid)
+            if (!seen.contains(c.identifier)) { seen.insert(c.identifier); out.append(c); }
+    };
+    if (!rel.anyOf.isEmpty()) {
+        for (const Relationship &sub : rel.anyOf) collectOne(sub);
+    } else {
+        collectOne(rel);
+    }
+    std::sort(out.begin(), out.end(), [](const CkanModule &a, const CkanModule &b) {
+        return ModuleVersion(a.version) > ModuleVersion(b.version);
+    });
+    return out;
+}
+
 // 版本约束的可读描述（用于多提供者选择弹窗提示），空约束返回空串
 QString constraintText(const Relationship &rel)
 {
@@ -162,20 +217,7 @@ ResolutionResult RelationshipResolver::resolve(const QVector<CkanModule> &module
     }
 
     // 虚拟包索引：虚拟包名 -> 提供该虚拟包的候选模块列表
-    QMap<QString, QVector<CkanModule>> virtualIndex;
-    for (auto it = m_index.constBegin(); it != m_index.constEnd(); ++it) {
-        for (const CkanModule &cand : it.value()) {
-            const QStringList prov = cand.providesList();
-            for (const QString &p : prov) {
-                QVector<CkanModule> &v = virtualIndex[p];
-                bool exists = false;
-                for (const CkanModule &existing : v)
-                    if (existing.identifier == cand.identifier) { exists = true; break; }
-                if (!exists)
-                    v.append(cand);
-            }
-        }
-    }
+    const QMap<QString, QVector<CkanModule>> virtualIndex = buildVirtualIndex(m_index);
 
     QVector<CkanModule> queue = modulesToInstall;
     for (const CkanModule &m : queue) {
@@ -190,31 +232,7 @@ ResolutionResult RelationshipResolver::resolve(const QVector<CkanModule> &module
     // any_of 关系收集所有子关系的候选（去重）；单关系收集满足约束的全部提供者。
     // 定义在主循环外：processRel（自动安装）与 collectRecommends（弹窗收集）共用。
     auto candidatesForRel = [&](const Relationship &rel) -> QVector<CkanModule> {
-        QVector<CkanModule> out;
-        QSet<QString> seen;
-        auto collectOne = [&](const Relationship &sub) {
-            QVector<CkanModule> candidates;
-            const auto found = m_index.constFind(sub.name);
-            if (found != m_index.constEnd())
-                candidates = found.value();
-            else {
-                const auto vf = virtualIndex.constFind(sub.name);
-                if (vf != virtualIndex.constEnd())
-                    candidates = vf.value();
-            }
-            const QVector<CkanModule> valid = pickCandidates(candidates, sub, m_kspVersion, m_extraRange);
-            for (const CkanModule &c : valid)
-                if (!seen.contains(c.identifier)) { seen.insert(c.identifier); out.append(c); }
-        };
-        if (!rel.anyOf.isEmpty()) {
-            for (const Relationship &sub : rel.anyOf) collectOne(sub);
-        } else {
-            collectOne(rel);
-        }
-        std::sort(out.begin(), out.end(), [](const CkanModule &a, const CkanModule &b) {
-            return ModuleVersion(a.version) > ModuleVersion(b.version);
-        });
-        return out;
+        return relationshipCandidates(rel, m_index, virtualIndex, m_kspVersion, m_extraRange);
     };
 
     // 处理队列（BFS 依赖展开）
@@ -442,6 +460,62 @@ ResolutionResult RelationshipResolver::resolve(const QVector<CkanModule> &module
             result.modulesToInstall.append(m);
     }
     return result;
+}
+
+QVector<CkanModule> RelationshipResolver::collectOptionalFor(
+    const CkanModule &parent, const QVector<CkanModule> &curInstallSet,
+    const Registry &registry, bool wantRecommends,
+    const GameVersion &kspVersion, const GameVersionRange &extraRange)
+{
+    QMutexLocker regLock(registry.mutex());
+    m_kspVersion = kspVersion;
+    m_extraRange = extraRange;
+
+    // 与 resolve() 一致地构建"已选/已安装"集合：已安装 registry + 当前待安装集合（待装版本优先）。
+    QMap<QString, CkanModule> selectedByIdent;
+    QMap<QString, QString>    providedToOwner;
+    for (auto it = registry.installedModules.constBegin();
+         it != registry.installedModules.constEnd(); ++it) {
+        const InstalledModule &im = it.value();
+        selectedByIdent[im.identifier] = im.module;
+        for (const QString &p : providedBy(im.module))
+            if (!providedToOwner.contains(p)) providedToOwner[p] = im.identifier;
+    }
+    for (auto it = registry.installedDlls.constBegin();
+         it != registry.installedDlls.constEnd(); ++it) {
+        const QString id = it.key();
+        if (id.isEmpty()) continue;
+        if (!providedToOwner.contains(id)) providedToOwner[id] = id;
+    }
+    for (const CkanModule &m : curInstallSet) {
+        selectedByIdent[m.identifier] = m;
+        for (const QString &p : providedBy(m))
+            if (!providedToOwner.contains(p)) providedToOwner[p] = m.identifier;
+    }
+
+    const QMap<QString, QVector<CkanModule>> vindex = buildVirtualIndex(m_index);
+    const QVector<Relationship> &rels = wantRecommends ? parent.recommends : parent.suggests;
+
+    // 收集单个父模组的推荐/建议候选：跳过已满足/已安装/已选、排除冲突，按标识符去重。不做级联。
+    QVector<CkanModule> out;
+    QSet<QString> seen;
+    for (const Relationship &rel : rels) {
+        if (dependencySatisfied(selectedByIdent, providedToOwner, rel))
+            continue; // 已安装/已选（含版本满足），无需再次推荐
+        const QVector<CkanModule> cands =
+            relationshipCandidates(rel, m_index, vindex, m_kspVersion, m_extraRange);
+        for (const CkanModule &c : cands) {
+            if (seen.contains(c.identifier)
+                || selectedByIdent.contains(c.identifier)
+                || providedToOwner.contains(c.identifier))
+                continue; // 去重 / 已安装或已选
+            if (!conflictsWith(c, selectedByIdent, providedToOwner).isEmpty())
+                continue; // 与当前集合冲突 → 静默跳过
+            seen.insert(c.identifier);
+            out.append(c);
+        }
+    }
+    return out;
 }
 
 } // namespace ckan

@@ -65,6 +65,19 @@ public:
                              const GameVersionRange &extraRange = GameVersionRange(),
                              bool collectRecommends = false);
 
+    // 收集单个父模组的推荐(Recommends)/建议(Suggests)候选（仅收集候选，不安装、不级联）。
+    // curInstallSet: 当前待安装集合（含依赖）；与 registry 一起构成"已选"集合，
+    //   用于跳过已满足/已安装/已选、排除冲突候选。
+    // wantRecommends: true=Recommends，false=Suggests。
+    // 供多阶段渐进式弹窗使用：每次只针对用户明确选择的模组收集其推荐/建议，
+    // 由 UI 层逐个弹窗勾选，选中后再级联收集下一轮。
+    QVector<CkanModule> collectOptionalFor(const CkanModule &parent,
+                                           const QVector<CkanModule> &curInstallSet,
+                                           const Registry &registry,
+                                           bool wantRecommends,
+                                           const GameVersion &kspVersion = GameVersion(),
+                                           const GameVersionRange &extraRange = GameVersionRange());
+
 private:
     const QMap<QString, QVector<CkanModule>> &m_index;
     GameVersion m_kspVersion;
